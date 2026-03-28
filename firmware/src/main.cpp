@@ -36,6 +36,8 @@ constexpr const char *kBedJetServiceUuid = "00001000-bed0-0080-aa55-4265644a6574
 constexpr const char *kBedJetStatusUuid = "00002000-bed0-0080-aa55-4265644a6574";
 constexpr const char *kBedJetCommandUuid = "00002004-bed0-0080-aa55-4265644a6574";
 constexpr const char *kBedJetNameUuid = "00002001-bed0-0080-aa55-4265644a6574";
+constexpr const char *kFirmwareBuildId = __DATE__ " " __TIME__;
+constexpr uint32_t kFirmwareApiVersion = 3;
 
 enum BedjetButton : uint8_t {
   BTN_OFF = 0x1,
@@ -130,6 +132,16 @@ struct OtaUpdateState {
 };
 
 OtaUpdateState otaUpdateState;
+
+struct OtaPersistState {
+  uint32_t bootCount = 0;
+  String lastStatus;
+  String lastSha256;
+  String lastError;
+  String lastAttemptAt;
+};
+
+OtaPersistState otaPersistState;
 BLEScan *bleScan = nullptr;
 BLEClient *activeBleClient = nullptr;
 String activeBleAddress;
@@ -197,6 +209,22 @@ void saveWiFiConfig() {
   preferences.putString("wifi.ssid", wifiConfig.ssid);
   preferences.putString("wifi.password", wifiConfig.password);
   preferences.putString("wifi.hostname", wifiConfig.hostname);
+}
+
+void loadOtaPersistState() {
+  otaPersistState.bootCount = preferences.getULong("ota.bootCount", 0);
+  otaPersistState.lastStatus = preferences.getString("ota.lastStatus", "");
+  otaPersistState.lastSha256 = preferences.getString("ota.lastSha", "");
+  otaPersistState.lastError = preferences.getString("ota.lastErr", "");
+  otaPersistState.lastAttemptAt = preferences.getString("ota.lastAt", "");
+}
+
+void saveOtaPersistState() {
+  preferences.putULong("ota.bootCount", otaPersistState.bootCount);
+  preferences.putString("ota.lastStatus", otaPersistState.lastStatus);
+  preferences.putString("ota.lastSha", otaPersistState.lastSha256);
+  preferences.putString("ota.lastErr", otaPersistState.lastError);
+  preferences.putString("ota.lastAt", otaPersistState.lastAttemptAt);
 }
 
 String effectiveHostname() {
@@ -774,6 +802,19 @@ void addNetworkState(JsonObject object) {
   object["mdnsUrl"] = isStationConnected() ? "http://" + effectiveHostname() + ".local" : String("");
 }
 
+void addFirmwareInfo(JsonObject object) {
+  object["apiVersion"] = kFirmwareApiVersion;
+  object["buildId"] = kFirmwareBuildId;
+  object["sketchMd5"] = ESP.getSketchMD5();
+  object["bootCount"] = otaPersistState.bootCount;
+  object["canRollback"] = Update.canRollBack();
+  JsonObject ota = object["ota"].to<JsonObject>();
+  ota["lastStatus"] = otaPersistState.lastStatus;
+  ota["lastSha256"] = otaPersistState.lastSha256;
+  ota["lastError"] = otaPersistState.lastError;
+  ota["lastAttemptAt"] = otaPersistState.lastAttemptAt;
+}
+
 bool isClaimRoute() {
   return server.uri() == "/api/v1/claim/status" || server.uri() == "/api/v1/claim";
 }
@@ -787,7 +828,7 @@ bool isLocalAdminRoute() {
 }
 
 bool requestRequiresAuth() {
-  if (server.uri() == "/healthz") {
+  if (server.uri() == "/healthz" || server.uri() == "/api/v1/version") {
     return false;
   }
   if (isClaimRoute()) {
@@ -1334,8 +1375,18 @@ void handleHealthz() {
   doc["service"] = "bedjet-gateway";
   doc["simulatedBackend"] = BEDJET_SIMULATED_BACKEND == 1;
   doc["claimed"] = authState.claimed;
+  doc["firmwareBuildId"] = kFirmwareBuildId;
   JsonObject network = doc["network"].to<JsonObject>();
   addNetworkState(network);
+  writeJsonResponse(200, doc);
+}
+
+void handleVersion() {
+  JsonDocument doc;
+  doc["ok"] = true;
+  doc["service"] = "bedjet-gateway";
+  JsonObject firmware = doc["firmware"].to<JsonObject>();
+  addFirmwareInfo(firmware);
   writeJsonResponse(200, doc);
 }
 
@@ -1346,6 +1397,8 @@ void handleState() {
   claim["gatewayId"] = authState.gatewayId;
   JsonObject network = doc["network"].to<JsonObject>();
   addNetworkState(network);
+  JsonObject firmware = doc["firmware"].to<JsonObject>();
+  addFirmwareInfo(firmware);
   JsonObject sides = doc["sides"].to<JsonObject>();
   addSlot(sides["left"].to<JsonObject>(), leftState.slot, leftState.status);
   addSlot(sides["right"].to<JsonObject>(), rightState.slot, rightState.status);
@@ -1362,6 +1415,8 @@ void handleLocalStatus() {
   claim["claimedAt"] = authState.claimedAt;
   JsonObject network = doc["network"].to<JsonObject>();
   addNetworkState(network);
+  JsonObject firmware = doc["firmware"].to<JsonObject>();
+  addFirmwareInfo(firmware);
   JsonObject sides = doc["sides"].to<JsonObject>();
   addSlot(sides["left"].to<JsonObject>(), leftState.slot, leftState.status);
   addSlot(sides["right"].to<JsonObject>(), rightState.slot, rightState.status);
@@ -1628,21 +1683,12 @@ void handleFirmwareUploadChunk() {
         return;
       }
 
-      size_t expectedSize = upload.totalSize;
-      if (expectedSize == 0 && server.hasHeader("Content-Length")) {
-        expectedSize = static_cast<size_t>(server.header("Content-Length").toInt());
-      }
-      if (expectedSize == 0) {
-        otaUpdateState.error = "missing or invalid Content-Length";
-        return;
-      }
-
-      if (!Update.begin(expectedSize, U_FLASH)) {
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
         otaUpdateState.error = String("Update begin failed: ") + Update.errorString();
         return;
       }
 
-      otaUpdateState.expectedSize = expectedSize;
+      otaUpdateState.expectedSize = upload.totalSize;
       otaUpdateState.started = true;
       mbedtls_sha256_init(&otaUpdateState.shaCtx);
       mbedtls_sha256_starts_ret(&otaUpdateState.shaCtx, 0);
@@ -1713,6 +1759,10 @@ void handleFirmwareUpdate() {
 
   if (otaUpdateState.error.length() > 0) {
     response["error"] = otaUpdateState.error;
+    otaPersistState.lastStatus = "failed";
+    otaPersistState.lastError = otaUpdateState.error;
+    otaPersistState.lastAttemptAt = String(millis());
+    saveOtaPersistState();
     resetOtaUpdateState();
     writeJsonResponse(400, response);
     return;
@@ -1720,6 +1770,10 @@ void handleFirmwareUpdate() {
 
   if (!otaUpdateState.completed || !otaUpdateState.ok) {
     response["error"] = "firmware upload incomplete";
+    otaPersistState.lastStatus = "failed";
+    otaPersistState.lastError = "firmware upload incomplete";
+    otaPersistState.lastAttemptAt = String(millis());
+    saveOtaPersistState();
     resetOtaUpdateState();
     writeJsonResponse(400, response);
     return;
@@ -1729,7 +1783,37 @@ void handleFirmwareUpdate() {
   response["applied"] = true;
   response["bytes"] = otaUpdateState.receivedSize;
   response["restarting"] = true;
+  response["buildId"] = kFirmwareBuildId;
+  otaPersistState.lastStatus = "applied-pending-reboot";
+  otaPersistState.lastSha256 = bytesToHexString(otaUpdateState.expectedSha256, sizeof(otaUpdateState.expectedSha256));
+  otaPersistState.lastError = "";
+  otaPersistState.lastAttemptAt = String(millis());
+  saveOtaPersistState();
   resetOtaUpdateState();
+  scheduleRestart();
+  writeJsonResponse(200, response);
+}
+
+void handleFirmwareRollback() {
+  JsonDocument response;
+  response["ok"] = false;
+  if (!Update.canRollBack()) {
+    response["error"] = "rollback image unavailable";
+    writeJsonResponse(409, response);
+    return;
+  }
+  if (!Update.rollBack()) {
+    response["error"] = "rollback failed";
+    writeJsonResponse(500, response);
+    return;
+  }
+  response["ok"] = true;
+  response["rolledBack"] = true;
+  response["restarting"] = true;
+  otaPersistState.lastStatus = "rolled-back-pending-reboot";
+  otaPersistState.lastError = "";
+  otaPersistState.lastAttemptAt = String(millis());
+  saveOtaPersistState();
   scheduleRestart();
   writeJsonResponse(200, response);
 }
@@ -1790,6 +1874,7 @@ void registerRoutes() {
   });
   server.on("/manage", HTTP_GET, handleGatewayPage);
   server.on("/healthz", HTTP_GET, handleHealthz);
+  server.on("/api/v1/version", HTTP_GET, handleVersion);
   server.on("/api/v1/provision/status", HTTP_GET, handleProvisionStatus);
   server.on("/api/v1/provision/wifi", HTTP_POST, handleProvisionSave);
   server.on("/api/v1/claim/status", HTTP_GET, handleClaimStatus);
@@ -1816,6 +1901,12 @@ void registerRoutes() {
     handleReleaseAll();
   });
   server.on("/api/v1/firmware/update", HTTP_POST, handleFirmwareUpdate, handleFirmwareUploadChunk);
+  server.on("/api/v1/firmware/rollback", HTTP_POST, []() {
+    if (!verifyRequestAuth()) {
+      return;
+    }
+    handleFirmwareRollback();
+  });
   server.onNotFound([]() {
     const String uri = server.uri();
     if (requestRequiresAuth() && !verifyRequestAuth()) {
@@ -1871,6 +1962,14 @@ void setup() {
   loadSlot(rightState.slot, "right");
   loadAuthState();
   loadWiFiConfig();
+  loadOtaPersistState();
+  otaPersistState.bootCount += 1;
+  if (otaPersistState.lastStatus == "applied-pending-reboot") {
+    otaPersistState.lastStatus = "applied";
+  } else if (otaPersistState.lastStatus == "rolled-back-pending-reboot") {
+    otaPersistState.lastStatus = "rolled-back";
+  }
+  saveOtaPersistState();
 
   connectWiFi();
   startMdns();

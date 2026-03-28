@@ -100,6 +100,51 @@ function New-SignedHeaders {
     }
 }
 
+function Get-GatewayVersion {
+    param(
+        [Parameter(Mandatory)][string]$BaseUrl
+    )
+
+    try {
+        return Invoke-RestMethod -Method GET -Uri ($BaseUrl + '/api/v1/version') -TimeoutSec 8
+    }
+    catch {
+        return $null
+    }
+}
+
+function Wait-GatewayOnline {
+    param(
+        [Parameter(Mandatory)][string]$BaseUrl,
+        [Parameter()][int]$Attempts = 45,
+        [Parameter()][int]$DelaySeconds = 2
+    )
+
+    for ($i = 1; $i -le $Attempts; $i += 1) {
+        try {
+            $null = Invoke-RestMethod -Method GET -Uri ($BaseUrl + '/healthz') -TimeoutSec 5
+            return
+        }
+        catch {
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+
+    throw "Gateway did not come back online within $($Attempts * $DelaySeconds) seconds."
+}
+
+function Get-CurlPath {
+    $candidate = Join-Path $env:WINDIR 'System32\curl.exe'
+    if (Test-Path $candidate) {
+        return $candidate
+    }
+    $fromPath = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($fromPath -and $fromPath.Source) {
+        return $fromPath.Source
+    }
+    throw 'curl.exe not found on this machine.'
+}
+
 $state = Get-SetupState
 
 $resolvedGatewayBaseUrl = if ($GatewayBaseUrl) {
@@ -157,6 +202,19 @@ if ($claim.gatewayId -ne $resolvedGatewayId) {
 }
 Write-Ok "Gateway claim verified for $resolvedGatewayId"
 
+$beforeVersion = Get-GatewayVersion -BaseUrl $resolvedGatewayBaseUrl
+if ($beforeVersion -and $beforeVersion.firmware -and $beforeVersion.firmware.buildId) {
+    $beforeBuild = [string]$beforeVersion.firmware.buildId
+    $beforeSketchMd5 = [string]$beforeVersion.firmware.sketchMd5
+    $beforeBootCount = [int]$beforeVersion.firmware.bootCount
+    Write-Ok "Current firmware build: $beforeBuild"
+    if ($beforeSketchMd5) {
+        Write-Ok "Current firmware sketch MD5: $beforeSketchMd5"
+    }
+} else {
+    Write-Host '[wait] Version endpoint unavailable on current firmware; post-update attestation will rely on health + OTA status fields when available.' -ForegroundColor Yellow
+}
+
 Write-Step 'Step 2: hash firmware binary'
 $firmwareSha256 = (Get-FileHash -Algorithm SHA256 -Path $resolvedFirmwarePath).Hash.ToLowerInvariant()
 $bodyMarker = "sha256:$firmwareSha256"
@@ -164,10 +222,107 @@ Write-Ok "Firmware SHA256: $firmwareSha256"
 
 Write-Step 'Step 3: upload signed firmware update'
 $headers = New-SignedHeaders -GatewayId $resolvedGatewayId -SharedSecret $resolvedGatewaySharedSecret -Path $updatePath -BodyMarker $bodyMarker -FirmwareSha256 $firmwareSha256
-$response = Invoke-RestMethod -Method POST -Uri $updateUri -Headers $headers -InFile $resolvedFirmwarePath -ContentType 'application/octet-stream' -TimeoutSec 240
+$response = $null
+$uploadHadReset = $false
+try {
+    $curl = Get-CurlPath
+    $curlArgs = @(
+        '-sS',
+        '-X', 'POST',
+        '-H', "X-Gateway-Id: $($headers['X-Gateway-Id'])",
+        '-H', "X-Timestamp: $($headers['X-Timestamp'])",
+        '-H', "X-Nonce: $($headers['X-Nonce'])",
+        '-H', "X-Signature: $($headers['X-Signature'])",
+        '-H', "X-Firmware-SHA256: $($headers['X-Firmware-SHA256'])",
+        '-F', "firmware=@$resolvedFirmwarePath;type=application/octet-stream",
+        $updateUri
+    )
+    $raw = & $curl @curlArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "curl upload failed with exit code $LASTEXITCODE"
+    }
+    if ($raw) {
+        Write-Host $raw
+    }
+    $response = $raw | ConvertFrom-Json
+}
+catch {
+    if (($_.Exception.Message -match 'underlying connection was closed') -or ($_.Exception.Message -match 'exit code 56')) {
+        $uploadHadReset = $true
+        Write-Host '[wait] Upload connection reset while gateway restarted; continuing with post-reboot attestation.' -ForegroundColor Yellow
+    } else {
+        throw
+    }
+}
 
-if (-not $response.ok) {
+if ($response -and -not $response.ok) {
     throw 'Gateway firmware update did not report success.'
 }
 
-Write-Ok "Gateway accepted firmware ($($response.bytes) bytes) and is restarting."
+if ($response -and $response.ok) {
+    Write-Ok "Gateway accepted firmware ($($response.bytes) bytes) and is restarting."
+} elseif ($uploadHadReset) {
+    Write-Ok 'Gateway restart detected during OTA response.'
+}
+
+Write-Step 'Step 4: post-update attestation'
+Wait-GatewayOnline -BaseUrl $resolvedGatewayBaseUrl
+Start-Sleep -Seconds 2
+
+$afterVersion = $null
+$attested = $false
+for ($attempt = 1; $attempt -le 30; $attempt += 1) {
+    $afterVersion = Get-GatewayVersion -BaseUrl $resolvedGatewayBaseUrl
+    if (-not $afterVersion -or -not $afterVersion.firmware) {
+        Start-Sleep -Seconds 2
+        continue
+    }
+
+    $afterStatus = [string]$afterVersion.firmware.ota.lastStatus
+    $afterSha = [string]$afterVersion.firmware.ota.lastSha256
+    $afterBootCount = [int]$afterVersion.firmware.bootCount
+    $bootAdvanced = $true
+    if ($beforeVersion -and $beforeVersion.firmware) {
+        $bootAdvanced = $afterBootCount -gt [int]$beforeVersion.firmware.bootCount
+    }
+
+    if (($afterStatus -in @('applied', 'applied-pending-reboot')) -and ($afterSha -eq $firmwareSha256) -and $bootAdvanced) {
+        $attested = $true
+        break
+    }
+
+    Start-Sleep -Seconds 2
+}
+
+if (-not $attested) {
+    throw 'Gateway OTA attestation did not converge (status/sha/bootCount mismatch).'
+}
+
+$afterBuild = [string]$afterVersion.firmware.buildId
+$afterSketchMd5 = [string]$afterVersion.firmware.sketchMd5
+$afterStatus = [string]$afterVersion.firmware.ota.lastStatus
+$afterSha = [string]$afterVersion.firmware.ota.lastSha256
+$afterBootCount = [int]$afterVersion.firmware.bootCount
+
+if ($beforeVersion -and $beforeVersion.firmware) {
+    $beforeBuild = [string]$beforeVersion.firmware.buildId
+    if ($beforeBuild -ne $afterBuild) {
+        Write-Ok "Firmware build changed: '$beforeBuild' -> '$afterBuild'"
+    } else {
+        Write-Ok "Firmware build ID unchanged ('$afterBuild'); attested via OTA SHA + boot count."
+    }
+    if ($beforeSketchMd5 -and $afterSketchMd5) {
+        if ($beforeSketchMd5 -ne $afterSketchMd5) {
+            Write-Ok "Firmware sketch MD5 changed: $beforeSketchMd5 -> $afterSketchMd5"
+        } else {
+            Write-Ok "Firmware sketch MD5 unchanged: $afterSketchMd5"
+        }
+    }
+    Write-Ok "Gateway boot count: $beforeBootCount -> $afterBootCount"
+} else {
+    Write-Ok "Firmware build after update: '$afterBuild'"
+}
+if (-not $afterSketchMd5) {
+    throw 'Gateway firmware sketch MD5 is missing; attestation incomplete.'
+}
+Write-Ok 'Gateway OTA attestation passed (status + SHA256).'
