@@ -3,9 +3,11 @@
 #include <BLEDevice.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
+#include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <mbedtls/md.h>
+#include <mbedtls/sha256.h>
 #include <vector>
 
 #ifndef WIFI_SSID
@@ -114,6 +116,20 @@ WiFiConfigState wifiConfig;
 bool mdnsStarted = false;
 bool restartScheduled = false;
 unsigned long restartAtMs = 0;
+
+struct OtaUpdateState {
+  bool active = false;
+  bool started = false;
+  bool completed = false;
+  bool ok = false;
+  size_t expectedSize = 0;
+  size_t receivedSize = 0;
+  uint8_t expectedSha256[32] = {0};
+  String error;
+  mbedtls_sha256_context shaCtx;
+};
+
+OtaUpdateState otaUpdateState;
 BLEScan *bleScan = nullptr;
 BLEClient *activeBleClient = nullptr;
 String activeBleAddress;
@@ -424,6 +440,35 @@ String bytesToHexString(const uint8_t *data, size_t length) {
     out += hex[data[i] & 0x0f];
   }
   return out;
+}
+
+bool parseSha256Hex(const String &hex, uint8_t output[32]) {
+  if (hex.length() != 64) {
+    return false;
+  }
+
+  auto nibble = [](char c) -> int {
+    if (c >= '0' && c <= '9') {
+      return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+      return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+      return c - 'A' + 10;
+    }
+    return -1;
+  };
+
+  for (size_t i = 0; i < 32; ++i) {
+    const int hi = nibble(hex[i * 2]);
+    const int lo = nibble(hex[(i * 2) + 1]);
+    if (hi < 0 || lo < 0) {
+      return false;
+    }
+    output[i] = static_cast<uint8_t>((hi << 4) | lo);
+  }
+  return true;
 }
 
 bool parseBedJetStatusPacket(const std::string &raw, ParsedBedJetStatus &parsed, String &error) {
@@ -793,7 +838,10 @@ bool verifyRequestAuth() {
     return false;
   }
 
-  const String body = server.hasArg("plain") ? server.arg("plain") : "";
+  String body = server.hasArg("plain") ? server.arg("plain") : "";
+  if (body.length() == 0 && server.hasHeader("X-Firmware-SHA256")) {
+    body = "sha256:" + server.header("X-Firmware-SHA256");
+  }
   const String message = String(server.method() == HTTP_GET ? "GET" : "POST") + "\n" + server.uri() + "\n" + body + "\n" +
                          timestamp + "\n" + nonce;
   const String expected = hmacHex(authState.sharedSecret, message);
@@ -1550,6 +1598,142 @@ void handleCommand() {
   writeJsonResponse(200, response);
 }
 
+void resetOtaUpdateState() {
+  if (otaUpdateState.active) {
+    mbedtls_sha256_free(&otaUpdateState.shaCtx);
+  }
+  otaUpdateState = OtaUpdateState{};
+}
+
+void handleFirmwareUploadChunk() {
+  HTTPUpload &upload = server.upload();
+  switch (upload.status) {
+    case UPLOAD_FILE_START: {
+      resetOtaUpdateState();
+      otaUpdateState.active = true;
+
+      if (!verifyRequestAuth()) {
+        otaUpdateState.error = "unauthorized firmware upload request";
+        return;
+      }
+
+      if (!server.hasHeader("X-Firmware-SHA256")) {
+        otaUpdateState.error = "missing X-Firmware-SHA256 header";
+        return;
+      }
+
+      const String expectedHash = server.header("X-Firmware-SHA256");
+      if (!parseSha256Hex(expectedHash, otaUpdateState.expectedSha256)) {
+        otaUpdateState.error = "invalid X-Firmware-SHA256 format";
+        return;
+      }
+
+      size_t expectedSize = upload.totalSize;
+      if (expectedSize == 0 && server.hasHeader("Content-Length")) {
+        expectedSize = static_cast<size_t>(server.header("Content-Length").toInt());
+      }
+      if (expectedSize == 0) {
+        otaUpdateState.error = "missing or invalid Content-Length";
+        return;
+      }
+
+      if (!Update.begin(expectedSize, U_FLASH)) {
+        otaUpdateState.error = String("Update begin failed: ") + Update.errorString();
+        return;
+      }
+
+      otaUpdateState.expectedSize = expectedSize;
+      otaUpdateState.started = true;
+      mbedtls_sha256_init(&otaUpdateState.shaCtx);
+      mbedtls_sha256_starts_ret(&otaUpdateState.shaCtx, 0);
+      break;
+    }
+    case UPLOAD_FILE_WRITE: {
+      if (!otaUpdateState.active || !otaUpdateState.started || otaUpdateState.error.length() > 0) {
+        return;
+      }
+      if (upload.currentSize == 0) {
+        return;
+      }
+      mbedtls_sha256_update_ret(&otaUpdateState.shaCtx, upload.buf, upload.currentSize);
+      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+        otaUpdateState.error = String("firmware write failed: ") + Update.errorString();
+        return;
+      }
+      otaUpdateState.receivedSize += upload.currentSize;
+      break;
+    }
+    case UPLOAD_FILE_END: {
+      if (!otaUpdateState.active || !otaUpdateState.started || otaUpdateState.error.length() > 0) {
+        return;
+      }
+
+      uint8_t digest[32];
+      mbedtls_sha256_finish_ret(&otaUpdateState.shaCtx, digest);
+      mbedtls_sha256_free(&otaUpdateState.shaCtx);
+
+      const String receivedHashHex = bytesToHexString(digest, sizeof(digest));
+      const String expectedHashHex = bytesToHexString(otaUpdateState.expectedSha256, sizeof(otaUpdateState.expectedSha256));
+      if (receivedHashHex != expectedHashHex) {
+        Update.abort();
+        otaUpdateState.error = String("firmware SHA256 mismatch expected=") + expectedHashHex + " received=" + receivedHashHex;
+        return;
+      }
+
+      if (!Update.end(true)) {
+        otaUpdateState.error = String("firmware finalize failed: ") + Update.errorString();
+        return;
+      }
+
+      otaUpdateState.completed = true;
+      otaUpdateState.ok = true;
+      break;
+    }
+    case UPLOAD_FILE_ABORTED: {
+      if (otaUpdateState.active && otaUpdateState.started) {
+        Update.abort();
+      }
+      otaUpdateState.error = "firmware upload aborted";
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+void handleFirmwareUpdate() {
+  JsonDocument response;
+  response["ok"] = false;
+
+  if (!otaUpdateState.active) {
+    response["error"] = "no upload session";
+    writeJsonResponse(400, response);
+    return;
+  }
+
+  if (otaUpdateState.error.length() > 0) {
+    response["error"] = otaUpdateState.error;
+    resetOtaUpdateState();
+    writeJsonResponse(400, response);
+    return;
+  }
+
+  if (!otaUpdateState.completed || !otaUpdateState.ok) {
+    response["error"] = "firmware upload incomplete";
+    resetOtaUpdateState();
+    writeJsonResponse(400, response);
+    return;
+  }
+
+  response["ok"] = true;
+  response["applied"] = true;
+  response["bytes"] = otaUpdateState.receivedSize;
+  response["restarting"] = true;
+  resetOtaUpdateState();
+  scheduleRestart();
+  writeJsonResponse(200, response);
+}
+
 void connectWiFi() {
   const String ssid = effectiveSsid();
   const String password = effectivePassword();
@@ -1631,6 +1815,7 @@ void registerRoutes() {
     }
     handleReleaseAll();
   });
+  server.on("/api/v1/firmware/update", HTTP_POST, handleFirmwareUpdate, handleFirmwareUploadChunk);
   server.onNotFound([]() {
     const String uri = server.uri();
     if (requestRequiresAuth() && !verifyRequestAuth()) {
@@ -1677,8 +1862,8 @@ void setup() {
   bleScan->setActiveScan(true);
   bleScan->setInterval(160);
   bleScan->setWindow(80);
-  const char *headerKeys[] = {"X-Gateway-Id", "X-Timestamp", "X-Nonce", "X-Signature"};
-  server.collectHeaders(headerKeys, 4);
+  const char *headerKeys[] = {"X-Gateway-Id", "X-Timestamp", "X-Nonce", "X-Signature", "X-Firmware-SHA256"};
+  server.collectHeaders(headerKeys, 5);
 
   leftState.slot.side = "left";
   rightState.slot.side = "right";
