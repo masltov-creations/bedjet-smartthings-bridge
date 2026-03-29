@@ -86,7 +86,7 @@ Do not shuffle that order unless you enjoy debugging Bluetooth and networking at
 
 The fastest and easiest install is agent first: With Codex, OpenClaw, Claude, or similar type the following:
 ```text
-Please install this project for me: https://github.com/bedjet-smartthings-bridge
+Please install this project for me: https://github.com/masltov-creations/bedjet-smartthings-bridge
 ```
 Read the README fully and follow it in order.
 Ask only for missing values: repo-root, ssh-target, gateway-url.
