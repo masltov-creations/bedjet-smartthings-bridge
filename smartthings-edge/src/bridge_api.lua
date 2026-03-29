@@ -1,21 +1,79 @@
 local cosock = require "cosock"
 local socket = require "cosock.socket"
 local json = require "st.json"
+local log = require "log"
 
 local M = {}
+local LAST_KNOWN_IP_FIELD = "bedjet_last_known_bridge_ip"
+
+local function trim(value)
+  return (value or ""):match("^%s*(.-)%s*$")
+end
+
+local function is_ipv4(value)
+  if not value then
+    return false
+  end
+  local a, b, c, d = value:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+  if not a then
+    return false
+  end
+  local parts = { tonumber(a), tonumber(b), tonumber(c), tonumber(d) }
+  for _, part in ipairs(parts) do
+    if not part or part < 0 or part > 255 then
+      return false
+    end
+  end
+  return true
+end
+
+local function sanitize_host(value)
+  local host = trim(value)
+  host = host:gsub("^https?://", "")
+  host = host:gsub("/.*$", "")
+  return trim(host)
+end
+
+local function resolve_ipv4(host)
+  local dns = socket.dns
+  if not dns or not dns.toip then
+    return nil
+  end
+  local ok, ip = pcall(dns.toip, host)
+  if not ok or not is_ipv4(ip) then
+    return nil
+  end
+  return ip
+end
 
 local function get_bridge_host(device)
-  local value = device.preferences.bridgeHost or ""
-  value = value:gsub("^https?://", "")
-  value = value:gsub("/.*$", "")
+  local value = sanitize_host(device.preferences.bridgeHost)
   if value == "" or value == "bridge-host-or-ip" then
-    error("Bridge host preference is not configured. Set bridgeHost to a real LAN hostname or IP.")
+    return "bedjet-bridge.local"
   end
   return value
 end
 
 local function get_bridge_port(device)
   return tonumber(device.preferences.bridgePort) or 8787
+end
+
+local function get_last_known_ip(device)
+  local stored = sanitize_host(device:get_field(LAST_KNOWN_IP_FIELD))
+  if is_ipv4(stored) then
+    return stored
+  end
+  return nil
+end
+
+local function save_last_known_ip(device, ip)
+  if not is_ipv4(ip) then
+    return
+  end
+  local current = get_last_known_ip(device)
+  if current ~= ip then
+    device:set_field(LAST_KNOWN_IP_FIELD, ip, { persist = true })
+  end
 end
 
 local function receive_line(client)
@@ -150,8 +208,7 @@ local function receive_chunked_body(client)
   return table.concat(chunks)
 end
 
-local function request_json(device, method, path, body)
-  local host = get_bridge_host(device)
+local function request_json_using_host(host, device, method, path, body)
   local port = get_bridge_port(device)
 
   local client = assert(socket.tcp())
@@ -209,6 +266,37 @@ local function request_json(device, method, path, body)
     error(decoded.error or ("Bridge returned HTTP " .. tostring(status_code)))
   end
   return decoded
+end
+
+local function request_json(device, method, path, body)
+  local configured_host = get_bridge_host(device)
+  local hosts = { configured_host }
+  local fallback_ip = get_last_known_ip(device)
+  if fallback_ip and fallback_ip ~= configured_host then
+    table.insert(hosts, fallback_ip)
+  end
+
+  local last_err = nil
+  for _, host in ipairs(hosts) do
+    local ok, result_or_err = pcall(request_json_using_host, host, device, method, path, body)
+    if ok then
+      if not is_ipv4(configured_host) then
+        local resolved_ip = resolve_ipv4(configured_host)
+        if resolved_ip then
+          save_last_known_ip(device, resolved_ip)
+        end
+      else
+        save_last_known_ip(device, configured_host)
+      end
+      if host ~= configured_host then
+        log.warn(string.format("Bridge host fallback in use: configured=%s fallbackIp=%s", configured_host, host))
+      end
+      return result_or_err
+    end
+    last_err = tostring(result_or_err)
+  end
+
+  error(last_err or ("Unable to reach bridge host " .. configured_host))
 end
 
 function M.fetch_side(device, side)

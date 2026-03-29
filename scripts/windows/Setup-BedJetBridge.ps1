@@ -44,6 +44,7 @@ $script:ResolvedGatewayId = ''
 $script:ResolvedGatewaySharedSecret = ''
 $script:ResolvedBridgeLanUrl = ''
 $script:ResolvedSmartThingsBridgeHost = ''
+$script:ResolvedSmartThingsBridgeFallbackIp = ''
 $script:ResolvedSshTarget = ''
 
 function Write-Step {
@@ -570,54 +571,118 @@ function Get-UriHost {
     return ([System.Uri]$Uri).Host
 }
 
+function Test-Ipv4Address {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Value
+    )
+
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($Value, [ref]$ip)) {
+        return $false
+    }
+    return $ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork
+}
+
+function Get-SshHostAlias {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Target
+    )
+
+    $value = $Target.Trim()
+    if (-not $value) {
+        return ''
+    }
+    if ($value.Contains('@')) {
+        $value = ($value -split '@')[-1]
+    }
+    if ($value.Contains(':')) {
+        $value = ($value -split ':')[0]
+    }
+    return $value.Trim()
+}
+
 function Resolve-SmartThingsBridgeHost {
     param(
         [Parameter(Mandatory)]
         [hashtable]$RemoteFacts,
 
         [Parameter(Mandatory)]
-        [int]$Port
+        [int]$Port,
+
+        [Parameter()]
+        [string]$PreferredHostname = '',
+
+        [Parameter()]
+        [string]$LastKnownIp = ''
     )
 
-    $candidates = [System.Collections.Generic.List[string]]::new()
+    $hostnameCandidates = [System.Collections.Generic.List[string]]::new()
+    $fallbackCandidates = [System.Collections.Generic.List[string]]::new()
+
+    if ($PreferredHostname) {
+        [void]$hostnameCandidates.Add($PreferredHostname)
+    }
 
     if ($RemoteFacts.ContainsKey('host_fqdn') -and $RemoteFacts['host_fqdn']) {
-        [void]$candidates.Add([string]$RemoteFacts['host_fqdn'])
+        [void]$hostnameCandidates.Add([string]$RemoteFacts['host_fqdn'])
         $short = ([string]$RemoteFacts['host_fqdn']).Split('.')[0]
         if ($short) {
-            [void]$candidates.Add("$short.local")
+            [void]$hostnameCandidates.Add("$short.local")
         }
     }
 
-    if ($RemoteFacts.ContainsKey('lan_ip') -and $RemoteFacts['lan_ip']) {
-        [void]$candidates.Add([string]$RemoteFacts['lan_ip'])
+    if ($LastKnownIp -and (Test-Ipv4Address -Value $LastKnownIp)) {
+        [void]$fallbackCandidates.Add($LastKnownIp)
     }
 
-    $deduped = [System.Collections.Generic.List[string]]::new()
-    foreach ($candidate in $candidates) {
-        if ($candidate -and -not $deduped.Contains($candidate)) {
-            [void]$deduped.Add($candidate)
+    if ($RemoteFacts.ContainsKey('lan_ip') -and $RemoteFacts['lan_ip'] -and (Test-Ipv4Address -Value ([string]$RemoteFacts['lan_ip']))) {
+        [void]$fallbackCandidates.Add([string]$RemoteFacts['lan_ip'])
+    }
+
+    $dedupedHostnames = [System.Collections.Generic.List[string]]::new()
+    foreach ($candidate in $hostnameCandidates) {
+        if ($candidate -and -not (Test-Ipv4Address -Value $candidate) -and -not $dedupedHostnames.Contains($candidate)) {
+            [void]$dedupedHostnames.Add($candidate)
         }
     }
 
-    foreach ($candidate in $deduped) {
+    $dedupedFallbackIps = [System.Collections.Generic.List[string]]::new()
+    foreach ($candidate in $fallbackCandidates) {
+        if ($candidate -and -not $dedupedFallbackIps.Contains($candidate)) {
+            [void]$dedupedFallbackIps.Add($candidate)
+        }
+    }
+
+    foreach ($candidate in $dedupedHostnames) {
         $health = Invoke-JsonRequest -Method 'GET' -Uri "http://$candidate`:$Port/healthz" -AllowFailure
         if ($health -and $health.ok) {
             return @{
                 Host = $candidate
-                Source = 'probed'
+                FallbackIp = if ($dedupedFallbackIps.Count -gt 0) { [string]$dedupedFallbackIps[0] } else { '' }
+                Source = 'probed-hostname'
             }
         }
     }
 
-    if ($RemoteFacts.ContainsKey('lan_ip') -and $RemoteFacts['lan_ip']) {
+    if ($dedupedHostnames.Count -gt 0) {
         return @{
-            Host = [string]$RemoteFacts['lan_ip']
-            Source = 'fallback-lan-ip'
+            Host = [string]$dedupedHostnames[0]
+            FallbackIp = if ($dedupedFallbackIps.Count -gt 0) { [string]$dedupedFallbackIps[0] } else { '' }
+            Source = 'preferred-hostname-with-ip-fallback'
         }
     }
 
-    throw 'Unable to determine SmartThings bridge host target from remote facts.'
+    if ($dedupedFallbackIps.Count -gt 0) {
+        return @{
+            Host = [string]$dedupedFallbackIps[0]
+            FallbackIp = [string]$dedupedFallbackIps[0]
+            Source = 'fallback-ip-only'
+        }
+    }
+
+    throw 'Unable to determine SmartThings bridge host target from remote facts or setup state.'
 }
 
 function Get-HmacSignature {
@@ -872,8 +937,18 @@ if (-not $SkipRemote) {
         throw 'docker compose is not available on the remote host.'
     }
     $script:ResolvedBridgeLanUrl = "http://$($remoteFacts['lan_ip']):$BridgePort"
-    $smartThingsBridge = Resolve-SmartThingsBridgeHost -RemoteFacts $remoteFacts -Port $BridgePort
+    $savedSmartThingsHost = if ($state.Contains('smartThingsBridgeHost')) { [string]$state['smartThingsBridgeHost'] } else { '' }
+    $savedFallbackIp = if ($state.Contains('smartThingsBridgeFallbackIp')) { [string]$state['smartThingsBridgeFallbackIp'] } else { '' }
+    $sshAlias = Get-SshHostAlias -Target $script:ResolvedSshTarget
+    $preferredHostname = ''
+    if ($savedSmartThingsHost -and -not (Test-Ipv4Address -Value $savedSmartThingsHost)) {
+        $preferredHostname = $savedSmartThingsHost
+    } elseif ($sshAlias) {
+        $preferredHostname = if ($sshAlias.Contains('.')) { $sshAlias } else { "$sshAlias.local" }
+    }
+    $smartThingsBridge = Resolve-SmartThingsBridgeHost -RemoteFacts $remoteFacts -Port $BridgePort -PreferredHostname $preferredHostname -LastKnownIp $savedFallbackIp
     $script:ResolvedSmartThingsBridgeHost = $smartThingsBridge.Host
+    $script:ResolvedSmartThingsBridgeFallbackIp = $smartThingsBridge.FallbackIp
     Write-Ok "Remote LAN IP: $($remoteFacts['lan_ip'])"
     if ($remoteFacts['host_fqdn']) {
         Write-Ok "Remote host FQDN: $($remoteFacts['host_fqdn'])"
@@ -882,9 +957,13 @@ if (-not $SkipRemote) {
         Write-Ok "Remote Tailscale IP: $($remoteFacts['tailscale_ip'])"
     }
     Write-Ok "SmartThings bridge host target: $($script:ResolvedSmartThingsBridgeHost) [$($smartThingsBridge.Source)]"
+    if ($script:ResolvedSmartThingsBridgeFallbackIp) {
+        Write-Ok "SmartThings bridge fallback IP: $($script:ResolvedSmartThingsBridgeFallbackIp)"
+    }
     Write-Ok 'Remote Docker looks healthy'
 } else {
     $script:ResolvedSmartThingsBridgeHost = '127.0.0.1'
+    $script:ResolvedSmartThingsBridgeFallbackIp = '127.0.0.1'
 }
 
 if ($script:ResolvedSshTarget) {
@@ -896,6 +975,9 @@ $state['gatewayId'] = $script:ResolvedGatewayId
 $state['gatewaySharedSecret'] = $script:ResolvedGatewaySharedSecret
 $state['bridgeLanUrl'] = $script:ResolvedBridgeLanUrl
 $state['smartThingsBridgeHost'] = $script:ResolvedSmartThingsBridgeHost
+$state['smartThingsBridgeFallbackIp'] = $script:ResolvedSmartThingsBridgeFallbackIp
+$state['smartThingsBridgePort'] = $BridgePort
+$state['smartThingsPreferenceReminder'] = 'Set bridgeHost/bridgePort for all BedJet Edge devices in SmartThings app.'
 $state['bridgePort'] = $BridgePort
 $state['updatedAt'] = [DateTimeOffset]::UtcNow.ToString('o')
 Save-SetupState -State $state
@@ -926,5 +1008,12 @@ Write-Host ''
 Write-Host '[ok] Setup script finished' -ForegroundColor Green
 Write-Host ("[ok] SmartThings bridge URL: {0}" -f $script:ResolvedBridgeLanUrl) -ForegroundColor Green
 Write-Host ("[ok] SmartThings driver host: {0}" -f $script:ResolvedSmartThingsBridgeHost) -ForegroundColor Green
+if ($script:ResolvedSmartThingsBridgeFallbackIp) {
+    Write-Host ("[ok] SmartThings fallback IP: {0}" -f $script:ResolvedSmartThingsBridgeFallbackIp) -ForegroundColor Green
+}
 Write-Host ("[ok] SmartThings driver port: {0}" -f $BridgePort) -ForegroundColor Green
 Write-Host ("[ok] Gateway URL: {0}" -f $script:ResolvedGatewayBaseUrl) -ForegroundColor Green
+Write-Host ''
+Write-Host '[next] SmartThings app required (cannot be skipped):' -ForegroundColor Yellow
+Write-Host ("[next] Set bridgeHost={0} and bridgePort={1} on all BedJet Edge devices." -f $script:ResolvedSmartThingsBridgeHost, $BridgePort) -ForegroundColor Yellow
+Write-Host '[next] Side mapping: Mas=left, Wendy=right (unit + bio launcher).' -ForegroundColor Yellow
