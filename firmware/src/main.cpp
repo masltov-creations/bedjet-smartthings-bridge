@@ -1992,7 +1992,6 @@ void registerRoutes() {
     }
     handleProvisionPage();
   });
-  server.on("/manage", HTTP_GET, handleGatewayPage);
   server.on("/healthz", HTTP_GET, handleHealthz);
   server.on("/api/v1/version", HTTP_GET, handleVersion);
   server.on("/api/v1/provision/status", HTTP_GET, handleProvisionStatus);

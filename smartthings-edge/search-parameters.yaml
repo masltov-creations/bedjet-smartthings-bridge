@@ -1,0 +1,3 @@
+mdns:
+  - service: "_bedjet-bridge._tcp"
+

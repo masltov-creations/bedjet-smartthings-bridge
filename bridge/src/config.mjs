@@ -37,8 +37,7 @@ export const config = Object.freeze({
   firmwareApiBaseUrl: (process.env.FIRMWARE_API_BASE_URL || "http://bedjet-gateway.local").replace(/\/$/, ""),
   firmwareGatewayId: process.env.FIRMWARE_GATEWAY_ID || "bedjet-bridge",
   firmwareSharedSecret: process.env.FIRMWARE_SHARED_SECRET || "",
-  firmwareAuthToken: process.env.FIRMWARE_AUTH_TOKEN || "",
-  simulateFirmware: parseBoolean(process.env.SIMULATE_FIRMWARE, true),
+  simulateFirmware: parseBoolean(process.env.SIMULATE_FIRMWARE, false),
   schedulerIntervalMs: parseInteger(process.env.SCHEDULER_INTERVAL_MS, 30_000)
 });
 

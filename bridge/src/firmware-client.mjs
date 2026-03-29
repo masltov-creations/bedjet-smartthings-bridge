@@ -129,9 +129,8 @@ class SimulatedFirmwareTransport {
 }
 
 class HttpFirmwareTransport {
-  constructor(baseUrl, { authToken, gatewayId, sharedSecret }) {
+  constructor(baseUrl, { gatewayId, sharedSecret }) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
-    this.authToken = authToken;
     this.gatewayId = gatewayId;
     this.sharedSecret = sharedSecret;
   }
@@ -185,10 +184,6 @@ class HttpFirmwareTransport {
       headers["Content-Type"] = "application/json";
     }
 
-    if (this.authToken) {
-      headers.Authorization = `Bearer ${this.authToken}`;
-    }
-
     if (this.sharedSecret) {
       const timestamp = String(Date.now());
       const nonce = crypto.randomBytes(12).toString("hex");
@@ -216,11 +211,10 @@ class HttpFirmwareTransport {
 }
 
 export class FirmwareClient {
-  constructor({ simulateFirmware, firmwareApiBaseUrl, firmwareAuthToken, firmwareGatewayId, firmwareSharedSecret, logger }) {
+  constructor({ simulateFirmware, firmwareApiBaseUrl, firmwareGatewayId, firmwareSharedSecret, logger }) {
     this.transport = simulateFirmware
       ? new SimulatedFirmwareTransport(logger)
       : new HttpFirmwareTransport(firmwareApiBaseUrl, {
-          authToken: firmwareAuthToken,
           gatewayId: firmwareGatewayId,
           sharedSecret: firmwareSharedSecret
         });

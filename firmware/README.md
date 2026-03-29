@@ -17,14 +17,14 @@ This firmware exposes the bridge-facing API contract for provisioning, claim/aut
 ## Build
 
 ```bash
-cd /mnt/d/Dev/bedjet-smartthings-bridge/firmware
+cd <repo-root>/firmware
 pio run
 ```
 
 ## Flash
 
 ```bash
-cd /mnt/d/Dev/bedjet-smartthings-bridge/firmware
+cd <repo-root>/firmware
 pio run -t upload
 ```
 
@@ -68,7 +68,7 @@ Attestation endpoints:
 Windows helper:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File D:\Dev\bedjet-smartthings-bridge\scripts\windows\Update-BedJetGatewayFirmware.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Update-BedJetGatewayFirmware.ps1
 ```
 
 This script loads gateway URL/id/secret from `data\setup-state.json` by default, signs the upload request, and posts the compiled firmware binary from:

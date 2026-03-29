@@ -1,0 +1,13 @@
+services:
+  bedjet-bridge:
+    container_name: bedjet-bridge
+    build:
+      context: ../../bridge
+    restart: unless-stopped
+    env_file:
+      - bridge.env
+    ports:
+      - "${BRIDGE_PORT:-8787}:8787"
+    volumes:
+      - ../../bridge-data:/app/data
+

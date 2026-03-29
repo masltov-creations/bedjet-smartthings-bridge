@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter()]
-    [string]$SshTarget = 'user@bridge-host',
+    [string]$SshTarget = '',
 
     [Parameter()]
     [string]$InstallDir = '~/apps/bedjet-smartthings-bridge',
@@ -43,6 +43,7 @@ $script:ResolvedGatewayRemoteBaseUrl = ''
 $script:ResolvedGatewayId = ''
 $script:ResolvedGatewaySharedSecret = ''
 $script:ResolvedBridgeLanUrl = ''
+$script:ResolvedSshTarget = ''
 
 function Write-Step {
     param(
@@ -445,6 +446,34 @@ function Resolve-GatewayConfig {
     }
 }
 
+function Resolve-SshTarget {
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$State,
+
+        [Parameter()]
+        [string]$ProvidedTarget,
+
+        [Parameter()]
+        [switch]$RemoteSkipped
+    )
+
+    if ($RemoteSkipped) {
+        return ''
+    }
+
+    $candidate = $ProvidedTarget.Trim()
+    if (-not $candidate -and $State.Contains('sshTarget') -and $State['sshTarget']) {
+        $candidate = [string]$State['sshTarget']
+    }
+    $candidate = $candidate.Trim()
+    if (-not $candidate) {
+        throw 'SSH target is required for remote steps. Pass -SshTarget user@host (or run once with -SshTarget so it is saved in data/setup-state.json).'
+    }
+
+    return $candidate
+}
+
 function Invoke-JsonRequest {
     param(
         [Parameter(Mandatory)]
@@ -644,7 +673,6 @@ function Write-BridgeEnvFile {
         "FIRMWARE_API_BASE_URL=$script:ResolvedGatewayRemoteBaseUrl"
         "FIRMWARE_GATEWAY_ID=$script:ResolvedGatewayId"
         "FIRMWARE_SHARED_SECRET=$script:ResolvedGatewaySharedSecret"
-        'FIRMWARE_AUTH_TOKEN='
         'SIMULATE_FIRMWARE=false'
         'SCHEDULER_INTERVAL_MS=30000'
     ) -join "`r`n"
@@ -740,6 +768,7 @@ function Test-RemoteBridgeGatewayIntegration {
 
 $state = Get-SetupState
 Resolve-GatewayConfig -State $state
+$script:ResolvedSshTarget = Resolve-SshTarget -State $state -ProvidedTarget $SshTarget -RemoteSkipped:$SkipRemote
 
 Write-Step 'Step 1: local prerequisites'
 $checks = @(
@@ -751,14 +780,14 @@ $checks | ForEach-Object {
     Write-Ok ("{0}: {1}" -f $_.Name, $_.Path)
 }
 
-if (-not (Confirm-Step -Prompt "Use SSH target $SshTarget")) {
+if (-not $SkipRemote -and -not (Confirm-Step -Prompt "Use SSH target $($script:ResolvedSshTarget)")) {
     throw 'Aborted by user.'
 }
 
 if (-not $SkipRemote) {
     Write-Step 'Step 2: SSH batch-mode check'
-    Test-SshBatchMode -Target $SshTarget
-    Write-Ok "SSH batch mode works for $SshTarget"
+    Test-SshBatchMode -Target $script:ResolvedSshTarget
+    Write-Ok "SSH batch mode works for $($script:ResolvedSshTarget)"
 } else {
     Write-Step 'Step 2: remote checks skipped'
     $script:ResolvedBridgeLanUrl = "http://127.0.0.1:$BridgePort"
@@ -780,7 +809,7 @@ Write-Ok 'Signed gateway requests work'
 
 if (-not $SkipRemote) {
     Write-Step 'Step 5: remote host network and Docker check'
-    $remoteFacts = Get-RemoteFacts -Target $SshTarget -GatewayIp (Get-UriHost -Uri $script:ResolvedGatewayRemoteBaseUrl)
+    $remoteFacts = Get-RemoteFacts -Target $script:ResolvedSshTarget -GatewayIp (Get-UriHost -Uri $script:ResolvedGatewayRemoteBaseUrl)
     if (-not $remoteFacts['lan_ip']) {
         throw 'Remote host does not expose a LAN IPv4 address that can reach the gateway.'
     }
@@ -801,7 +830,9 @@ if (-not $SkipRemote) {
     Write-Ok 'Remote Docker looks healthy'
 }
 
-$state['sshTarget'] = $SshTarget
+if ($script:ResolvedSshTarget) {
+    $state['sshTarget'] = $script:ResolvedSshTarget
+}
 $state['gatewayBaseUrl'] = $script:ResolvedGatewayBaseUrl
 $state['gatewayRemoteBaseUrl'] = $script:ResolvedGatewayRemoteBaseUrl
 $state['gatewayId'] = $script:ResolvedGatewayId
@@ -813,20 +844,20 @@ Save-SetupState -State $state
 Write-Ok "Saved setup state to $SetupStatePath"
 
 if (-not $SkipDeploy -and -not $SkipRemote) {
-    if (-not (Confirm-Step -Prompt "Deploy the bridge to $SshTarget at $InstallDir")) {
+    if (-not (Confirm-Step -Prompt "Deploy the bridge to $($script:ResolvedSshTarget) at $InstallDir")) {
         throw 'Aborted by user.'
     }
 
     Write-Step 'Step 6: deploy bridge bundle'
-    Install-RemoteBridge -Target $SshTarget -RemoteInstallDir $InstallDir
+    Install-RemoteBridge -Target $script:ResolvedSshTarget -RemoteInstallDir $InstallDir
     Write-Ok 'Remote deploy completed'
 
     Write-Step 'Step 7: verify bridge health'
-    Test-RemoteBridgeHealth -Target $SshTarget -Port $BridgePort
+    Test-RemoteBridgeHealth -Target $script:ResolvedSshTarget -Port $BridgePort
     Write-Ok 'Remote bridge health check passed'
 
     Write-Step 'Step 8: verify bridge-to-gateway integration'
-    Test-RemoteBridgeGatewayIntegration -Target $SshTarget -Port $BridgePort
+    Test-RemoteBridgeGatewayIntegration -Target $script:ResolvedSshTarget -Port $BridgePort
     Write-Ok 'Bridge can talk to the claimed gateway'
 } elseif ($SkipRemote) {
     Write-Step 'Step 6: remote deploy skipped'

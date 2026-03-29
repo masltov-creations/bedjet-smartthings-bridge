@@ -1,281 +1,296 @@
 # BedJet SmartThings Bridge
 
-Private home-use BedJet control stack with an `ESP32-S3` gateway, a Dockerized Ubuntu VM bridge service, and a `SmartThings Hub` Edge LAN driver.
+## What It Is
 
-## Current Status
+This project connects two BedJet units to SmartThings with:
 
-- `Implemented`: script-first remote setup, concise local setup wizard, remote install artifacts, runnable bridge service, ESP32 firmware scaffold, SmartThings Edge scaffold, and setup docs.
-- `Guide mode`: the setup-app now provides a clean step-by-step install guide instead of browser-driven automation.
-- `Script-first path available`: Windows PowerShell scripts now prove SSH, remote LAN reachability, gateway claim, Docker, remote deploy, and bridge health/status before we depend on the wizard.
-- `LAN-first runtime`: SmartThings is expected to reach the bridge over the home LAN, not over Tailscale.
-- `Gateway claim scaffolded`: bridge-to-gateway claim status, claim, and signed-request hooks now exist in code.
-- `Gateway local admin page live`: the firmware now supports AP-based Wi‑Fi onboarding at `http://192.168.4.1` and a station-mode admin page at `http://bedjet-gateway.local/`.
-- `Validated in this workspace`: `node --test` passes under both `bridge/` and `setup-app/`, and both servers import cleanly.
-- `BLE backend implemented`: the ESP firmware now scans and connects over BLE directly instead of using the simulator.
-- `Not hardware-validated yet`: real BedJet BLE packet/control behavior against the physical BedJet units and SmartThings hub discovery/install on your hub.
+1. `ESP32-S3 Gateway` on LAN (BLE to BedJet).
+2. `Bridge Service` on Linux host (Docker).
+3. `SmartThings Edge Driver` (LAN control from SmartThings app).
 
-## Repo Layout
+Think of it as a translator stack: SmartThings speaks LAN, BedJet speaks BLE, and the bridge keeps everyone from arguing about state.
 
-```text
-bedjet-smartthings-bridge/
-├── README.md
-├── PLAN.md
-├── deploy/
-├── docs/
-├── bridge/
-├── firmware/
-├── mock-gateway/
-├── setup-app/
-└── smartthings-edge/
-```
-
-## Architecture
+GitHub does render Mermaid diagrams in Markdown files, so this should show up directly in the repo UI.
 
 ```mermaid
 flowchart LR
-  local["This Machine"] --> ssh["SSH / Admin access"]
-  ssh --> bridge["Ubuntu VM<br/>bedjet-bridge"]
-  local --> hub["SmartThings CLI<br/>Edge package"]
-  hub --> phone["SmartThings App<br/>Household users"]
-  hub --> lan["Home LAN"]
-  lan --> bridge
-  bridge --> esp["ESP32-S3 Gateway<br/>LAN + HMAC auth"]
-  esp --> left["BedJet Left"]
-  esp --> right["BedJet Right"]
+    ST["SmartThings App"] --> HUB["SmartThings Hub"]
+    HUB --> EDGE["Edge Driver"]
+    EDGE --> BRIDGE["Bridge Service :8787"]
+    BRIDGE --> GATEWAY["ESP32 Gateway :80"]
+    GATEWAY --> LEFT["Left BedJet (BLE)"]
+    GATEWAY --> RIGHT["Right BedJet (BLE)"]
+    ADMIN["Admin / Agent Machine"] -->|SSH| BRIDGE
+    ADMIN -->|HTTP| GATEWAY
 ```
 
-## Setup Flow
+## What You Need To Start
 
-### Script First
+- A Linux host reachable over SSH (for the bridge).
+- Docker + Compose on that Linux host.
+- ESP32-S3 that can run this firmware.
+- SmartThings hub + SmartThings CLI access.
+- Control machine (Windows/Linux/macOS) that can reach:
+  - bridge host over SSH
+  - gateway on LAN HTTP
+- Node.js `>=24` (for local tests/tools).
 
-Use the Windows PowerShell script when you want the smallest reliable path first:
+## Install Order
 
-```powershell
-powershell -ExecutionPolicy Bypass -File D:\Dev\bedjet-smartthings-bridge\scripts\windows\Setup-BedJetBridge.ps1
-```
+Run it in this order:
 
-Default target is `user@bridge-host` (change per your environment). The script walks these steps:
+1. Provision gateway on Wi-Fi.
+2. Install and verify bridge.
+3. Pair left and right BedJets.
+4. Install SmartThings Edge driver.
+5. Verify end-to-end control.
 
-1. local prerequisite checks
-2. SSH batch-mode verification
-3. remote host LAN and Docker verification
-4. local gateway discovery
-5. gateway claim and signed-request verification
-6. bridge bundle deploy
-7. remote bridge health check
-8. remote bridge-to-gateway integration verification
+Do not shuffle that order unless you enjoy debugging Bluetooth and networking at the same time.
 
-It stops on the first real failure.
+## Agent Instructions (Primary Install Path)
 
-The script saves rerun state in `data/setup-state.json` so the gateway URL, gateway ID, shared secret, and bridge LAN URL can be reused.
-
-Before the script can reach the gateway, flash the ESP32 and provision Wi‑Fi:
-
-1. power the ESP32
-2. join `BedJetGatewaySetup`
-3. open [http://192.168.4.1](http://192.168.4.1)
-4. save SSID, password, and hostname
-5. wait for the gateway to reboot onto your LAN
-
-Once the gateway is on Wi‑Fi, open the ESP admin page:
+Use this first with Codex, OpenClaw, Claude, or similar.
 
 ```text
-http://bedjet-gateway.local/
+Codex / OpenClaw / Claude:
+Please install this project for me:
+https://github.com/<owner>/<repo>
+
+Read the README fully and follow it in order.
+Ask only for missing values: <repo-root>, <ssh-target>, <gateway-url>.
+Do not assume SSH tunnels.
+Stop on first failure with the exact command, stderr, and the fix.
+Do not print or commit secrets.
 ```
 
-Use it to:
+## Connectivity Requirements (Must Be True)
 
-1. confirm network + claim status
-2. scan for nearby BedJets
-3. assign one unit to `Left`
-4. assign one unit to `Right`
-5. forget, verify, release BLE, and send simple per-side test commands
+- `SmartThings Hub -> Bridge`: hub can reach bridge LAN URL/port (default `8787`).
+- `Bridge -> Gateway`: bridge host can reach `<gateway-url>` over LAN.
+- `Gateway -> BedJet`: gateway is in BLE range of both units.
+- `Control machine -> Bridge host`: SSH works to `<ssh-target>`.
+- `Control machine -> Gateway`: can load gateway web/API for setup and checks.
+- `Bridge host + SmartThings Hub + Gateway`: same LAN or routed network with those ports explicitly allowed.
 
-Check the deployed bridge later with:
+## ESP Bounds (Important Limits)
+
+- Flash layout expects an `8 MB` ESP32-S3 with OTA partitioning.
+- OTA app slot size: `3,342,336 bytes` each (`~3.19 MiB`) for `app0` and `app1`.
+- SPIFFS size: `1,572,864 bytes` (`1.5 MiB`).
+- NVS size: `20 KiB`.
+- OTA metadata size: `8 KiB`.
+- Core dump partition: `64 KiB`.
+- HTTP server port: `80`.
+- Setup AP SSID: `BedJetGatewaySetup`.
+- SmartThings poll interval:
+  - default `15s`
+  - minimum `5s`
+  - maximum `120s`
+- BLE scan duration per scan request: `4s`.
+- Pairing model: exactly `2` logical BedJet slots, `left` and `right`.
+- Local admin command bounds:
+  - `fanStep`: `1-20`
+  - `targetTemperatureC`: `15-40`
+
+If your firmware binary grows past the OTA app slot limit, OTA will stop being fun very quickly.
+
+## Lockdown Guidance (No Secret Published)
+
+### Required Ports
+
+- `Bridge host TCP 22` (SSH): admin/control machines only.
+- `Bridge host TCP 8787` (bridge API): SmartThings hub + optional admin only.
+- `Gateway TCP 80` (gateway UI/API): bridge host + optional admin only.
+
+### Security Rules
+
+1. Default-deny inbound; allow-list only required source IPs.
+2. Do not expose bridge `8787` or gateway `80` to WAN.
+3. Keep secrets out of git:
+   - `FIRMWARE_SHARED_SECRET`
+   - `gatewaySharedSecret`
+4. Rotate claim/secret if exposure is suspected.
+
+### Example UFW Baseline (Bridge Host)
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow from <admin-ip-or-cidr> to any port 22 proto tcp
+sudo ufw allow from <smartthings-hub-ip> to any port 8787 proto tcp
+sudo ufw allow from <admin-ip-or-cidr> to any port 8787 proto tcp
+sudo ufw enable
+sudo ufw status verbose
+```
+
+## End-to-End Manual Flow (Fallback)
+
+### Step 1: Gateway Provisioning (ESP32)
+
+1. Flash firmware from `firmware/`.
+2. Join `BedJetGatewaySetup` temporary Wi-Fi AP.
+3. Open `http://192.168.4.1`.
+4. Save preferred Wi-Fi SSID/password/hostname for gateway LAN operation.
+5. Wait for the gateway to reboot onto your normal LAN.
+6. Verify network allows bridge host + SmartThings hub to reach gateway.
+7. Check `http://bedjet-gateway.local/healthz`.
+8. Open `http://bedjet-gateway.local/`.
+9. Pair left and right BedJet units:
+   - pair left while right is off
+   - pair right while left is off
+   - verify both after pairing
+
+### Step 2: Bridge Install + Verify
+
+Recommended path: use the Windows setup script at least once. It handles gateway claim, secret generation, deploy, and verification in one run.
+
+Windows (scripted):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File D:\Dev\bedjet-smartthings-bridge\scripts\windows\Get-BedJetBridgeStatus.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Setup-BedJetBridge.ps1 `
+  -SshTarget <ssh-target> `
+  -GatewayBaseUrl <gateway-url>
 ```
-
-Update gateway firmware remotely (HMAC-signed + SHA256-verified):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File D:\Dev\bedjet-smartthings-bridge\scripts\windows\Update-BedJetGatewayFirmware.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Get-BedJetBridgeStatus.ps1 `
+  -SshTarget <ssh-target>
 ```
 
-### Dry Run
+Linux/macOS (manual remote deploy):
 
-Use the mock gateway when you want to dry-run the claim/auth and bridge wiring before the real ESP32 is flashed:
+If you do not use the Windows setup script, you must claim the gateway yourself first and keep the same ID/secret in the bridge config.
+
+Choose values:
+
+- `<gateway-id>` example: `bedjet-bridge`
+- `<gateway-shared-secret>`: random hex string
+
+Claim the gateway once:
 
 ```bash
-cd /mnt/d/Dev/bedjet-smartthings-bridge/mock-gateway
-node src/server.mjs
+export GATEWAY_URL=<gateway-url>
+export GATEWAY_ID=<gateway-id>
+export GATEWAY_SHARED_SECRET="$(openssl rand -hex 32)"
+curl -fsS -X POST "$GATEWAY_URL/api/v1/claim" \
+  -H 'Content-Type: application/json' \
+  -d "{\"gatewayId\":\"$GATEWAY_ID\",\"sharedSecret\":\"$GATEWAY_SHARED_SECRET\"}"
 ```
 
-Then point the setup script at it:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File D:\Dev\bedjet-smartthings-bridge\scripts\windows\Setup-BedJetBridge.ps1 -GatewayBaseUrl http://127.0.0.1:8789
-```
-
-For a local-only dry run of gateway discovery, claim, and signed verification without the VM leg:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File D:\Dev\bedjet-smartthings-bridge\scripts\windows\Setup-BedJetBridge.ps1 -GatewayBaseUrl http://127.0.0.1:8789 -SkipRemote
-```
-
-For a full remote bridge dry run, the mock gateway must be reachable from both your Windows machine and the bridge VM.
-
-### Wizard
-
-The setup-app is now **guide mode** only:
-
-1. It provides a clean, concise, step-by-step install checklist for the 3 pieces:
-   - Gateway (ESP32)
-   - Bridge (Ubuntu VM)
-   - SmartThings Edge driver
-2. It does not orchestrate remote mutations from the browser path.
-3. Use script-first commands for real installation and verification.
-
-## Setup-App Quick Start
-
-### Local
+If the gateway is already claimed, reuse the existing values or reset the gateway before claiming again.
 
 ```bash
-cd /mnt/d/Dev/bedjet-smartthings-bridge/setup-app
-node src/server.mjs
+cd <repo-root>
+tar -czf /tmp/bedjet-bridge-bundle.tgz bridge deploy/bridge
+ssh <ssh-target> "mkdir -p ~/apps/bedjet-smartthings-bridge"
+scp /tmp/bedjet-bridge-bundle.tgz <ssh-target>:~/apps/bedjet-smartthings-bridge/
+ssh <ssh-target> "cd ~/apps/bedjet-smartthings-bridge && tar -xzf bedjet-bridge-bundle.tgz && cp -n deploy/bridge/bridge.env.example deploy/bridge/bridge.env && bash deploy/bridge/install-bridge-remote.sh --install-dir ~/apps/bedjet-smartthings-bridge"
 ```
 
-Open [http://127.0.0.1:8890](http://127.0.0.1:8890) if it does not auto-open.
+Required bridge env values (`deploy/bridge/bridge.env`):
 
-### Main Endpoints
+- `FIRMWARE_API_BASE_URL=<gateway-url>`
+- `FIRMWARE_GATEWAY_ID=<gateway-id>`
+- `FIRMWARE_SHARED_SECRET=<gateway-shared-secret>`
 
-These remain available for tooling/debug compatibility with prior workflow experiments:
+After deploy, verify:
 
-- `GET /api/setup/session`
-- `PUT /api/setup/session`
-- `POST /api/setup/step/:stepId/prepare`
-- `POST /api/setup/step/:stepId/permission`
-- `POST /api/setup/step/:stepId/run`
-- `POST /api/setup/step/:stepId/verify`
-- `POST /api/setup/ssh-discovery/scan`
-- `POST /api/setup/bridge-target/select`
-- `POST /api/setup/mock-mode/enable`
-- `POST /api/setup/handoff`
-- `GET /api/setup/debug/events`
-- `GET /api/setup/debug/bundle`
-
-## Bridge Runtime Flow
-
-The SmartThings hub does not talk BLE to BedJet directly. It runs an Edge LAN driver that:
-
-- calls the bridge over local HTTP
-- exposes left/right devices inside SmartThings
-- supports routines and household access
-- keeps normal app control local to your LAN
-
-The bridge remains the source of truth for pairing, schedules, Nightly Bio profiles, and firmware coordination.
-
-## Security Model
-
-- SmartThings talks only to the bridge.
-- The bridge talks to the gateway over the home LAN.
-- The bridge and gateway use a claim + signed-request model.
-- The setup script writes the shared secret into the remote bridge env file and saves it locally for reruns.
-- Saved gateway credentials are only reused when the setup script is pointed at the same gateway URL; dry-run state will not be reused against a different device.
-- `Tailscale` is optional for admin access only and is not required for normal SmartThings operation.
-
-## Bridge Runtime Quick Start
-
-### Local
+1. SSH works in batch mode:
 
 ```bash
-cd /mnt/d/Dev/bedjet-smartthings-bridge/bridge
-node src/server.mjs
+ssh -o BatchMode=yes <ssh-target> 'printf ok'
 ```
 
-Open [http://127.0.0.1:8787](http://127.0.0.1:8787).
-
-### Environment
-
-Copy [bridge/.env.example](/mnt/d/Dev/bedjet-smartthings-bridge/bridge/.env.example) to `.env` if you want overrides.
-
-Key settings:
-
-- `PORT`: HTTP port, default `8787`
-- `TIMEZONE`: schedule timezone, default `America/Los_Angeles`
-- `FIRMWARE_API_BASE_URL`: ESP32 gateway base URL, default `http://bedjet-gateway.local`
-- `FIRMWARE_GATEWAY_ID`: bridge identity presented to the gateway
-- `FIRMWARE_SHARED_SECRET`: shared secret used for HMAC request signing
-- `SIMULATE_FIRMWARE`: `true` uses the built-in simulator until BLE is ready
-- `DATA_PATH`: SQLite file path, default `bridge/data/bridge.sqlite`
-
-### Docker
+2. Bridge health:
 
 ```bash
-cd /mnt/d/Dev/bedjet-smartthings-bridge/bridge
-docker build -t bedjet-bridge .
-docker run --rm -p 8787:8787 \
-  -e FIRMWARE_API_BASE_URL=http://bedjet-gateway.local \
-  -v $(pwd)/data:/app/data \
-  bedjet-bridge
+ssh <ssh-target> "curl -fsS http://127.0.0.1:8787/healthz"
 ```
 
-## Firmware Quick Start
-
-The firmware scaffold lives under [firmware/](/mnt/d/Dev/bedjet-smartthings-bridge/firmware). It now exposes:
-
-- a local ESP admin page for Wi‑Fi setup and left/right pairing management
-- signed bridge-facing APIs under `/api/v1/*`
-- local human-facing admin APIs under `/api/v1/local/*`
-
-The pairing/control state machine is in place and the firmware now uses a real BLE transport path. It still needs validation against the physical BedJet units for scan, pair, verify, and command behavior.
-
-If PlatformIO is installed:
+3. Bridge-to-gateway state:
 
 ```bash
-cd /mnt/d/Dev/bedjet-smartthings-bridge/firmware
-pio run
+ssh <ssh-target> "curl -fsS http://127.0.0.1:8787/v1/system"
 ```
 
-## SmartThings Quick Start
+### Step 3: SmartThings Edge Driver
 
-The Edge package scaffold lives under [smartthings-edge/](/mnt/d/Dev/bedjet-smartthings-bridge/smartthings-edge).
+You need:
 
-Useful docs:
+- `<channel-id>`
+- `<hub-id>`
 
-- [docs/smartthings-cli.md](/mnt/d/Dev/bedjet-smartthings-bridge/docs/smartthings-cli.md)
-- [smartthings-edge/README.md](/mnt/d/Dev/bedjet-smartthings-bridge/smartthings-edge/README.md)
+Basic flow:
 
-Typical flow:
+1. Package the driver:
 
-1. Package the driver with the CLI.
+```bash
+XDG_STATE_HOME=/tmp smartthings edge:drivers:package <repo-root>/smartthings-edge
+```
+
 2. Create or reuse a private channel.
-3. Assign the driver to the channel.
-4. Enroll your hub in the channel.
+3. Assign the driver to that channel.
+4. Enroll the hub in that channel.
 5. Install the driver onto the hub.
+6. Configure the bridge host preference to the bridge LAN URL (example `http://bridge-host.local:8787`).
+7. Validate:
+   - Device discovery
+   - Left/right command execution
+   - Accurate state refresh/readback
 
-The initial driver surface intentionally stays conservative:
+Use:
 
-- `BedJet Left` and `BedJet Right` expose power, fan level, refresh, and current temperature
-- `Left Nightly Bio` and `Right Nightly Bio` act as launcher switches
-- richer BedJet-specific mode and target-temperature controls remain bridge-native until the driver is validated on hardware
+- `smartthings-edge/README.md`
+- `docs/smartthings-cli.md`
 
-## Operator Actions
+### Step 4: OTA Update (Optional)
 
-- `Local checks`: verify the tools and hardware visibility on this machine.
-- `SSH discovery`: ask permission first, then show saved hosts and active SSH/tunnel sessions.
-- `Target selection`: explicitly choose a host or enter one manually before any remote work starts.
-- `Docker precheck`: verify Docker and `docker compose`; if needed, approve one repair action at a time.
-- `Bridge install`: package and deploy the bridge to the Ubuntu VM over SSH.
-- `Build + flash`: try the ESP32 upload path or surface exact fallback instructions.
-- `Pairing`: choose one explicit action at a time and verify left and right independently.
-- `Generate handoff`: write a Codex-ready markdown handoff when direct automation is blocked.
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Update-BedJetGatewayFirmware.ps1 `
+  -GatewayBaseUrl <gateway-url>
+```
+
+## Dry Run (No Remote Deploy)
+
+```bash
+cd <repo-root>/mock-gateway
+node src/server.mjs
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Setup-BedJetBridge.ps1 `
+  -GatewayBaseUrl http://127.0.0.1:8789 `
+  -SkipRemote
+```
+
+## Dependencies
+
+- Bridge runtime:
+  - Docker Engine + Docker Compose plugin
+- Firmware:
+  - PlatformIO (build/flash)
+- SmartThings:
+  - SmartThings CLI
+
+## Verification Checklist
+
+1. `ssh -o BatchMode=yes <ssh-target> 'printf ok'` succeeds.
+2. `<gateway-url>/healthz` returns healthy response.
+3. Bridge `/healthz` passes on remote host.
+4. Bridge `/v1/system` reports claimed gateway.
+5. Left and right BedJet pairings both verify.
+6. SmartThings on/off control succeeds for both sides with true state feedback.
+7. SmartThings app state matches what the BedJet actually did, not just what we hoped it did.
+
+## Local Validation
+
+```bash
+cd <repo-root>/bridge && node --test
+cd <repo-root>/mock-gateway && node --test
+```
 
 ## References
 
-- [docs/setup-wizard.md](/mnt/d/Dev/bedjet-smartthings-bridge/docs/setup-wizard.md)
-- [docs/protocol-notes.md](/mnt/d/Dev/bedjet-smartthings-bridge/docs/protocol-notes.md)
-- [docs/onboarding.md](/mnt/d/Dev/bedjet-smartthings-bridge/docs/onboarding.md)
-- [docs/troubleshooting.md](/mnt/d/Dev/bedjet-smartthings-bridge/docs/troubleshooting.md)
-- [docs/e2e-session-runbook.md](/mnt/d/Dev/bedjet-smartthings-bridge/docs/e2e-session-runbook.md)
+- `docs/onboarding.md`
+- `docs/protocol-notes.md`
+- `docs/troubleshooting.md`

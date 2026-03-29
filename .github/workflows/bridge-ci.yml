@@ -1,0 +1,24 @@
+name: Repo CI
+
+on:
+  push:
+    paths:
+      - "bridge/**"
+      - ".github/workflows/bridge-ci.yml"
+  pull_request:
+    paths:
+      - "bridge/**"
+      - ".github/workflows/bridge-ci.yml"
+
+jobs:
+  bridge-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bridge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: node --test

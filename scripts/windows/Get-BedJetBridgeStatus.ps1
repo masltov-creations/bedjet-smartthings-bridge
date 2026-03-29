@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter()]
-    [string]$SshTarget = 'user@bridge-host',
+    [string]$SshTarget = '',
 
     [Parameter()]
     [int]$BridgePort = 8787
@@ -9,6 +9,46 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$SetupStatePath = Join-Path $RepoRoot 'data\setup-state.json'
+
+function Get-SetupState {
+    if (-not (Test-Path $SetupStatePath)) {
+        return [ordered]@{}
+    }
+
+    $raw = Get-Content $SetupStatePath -Raw
+    if (-not $raw.Trim()) {
+        return [ordered]@{}
+    }
+
+    $json = $raw | ConvertFrom-Json
+    $result = [ordered]@{}
+    foreach ($property in $json.PSObject.Properties) {
+        $result[$property.Name] = $property.Value
+    }
+    return $result
+}
+
+function Resolve-SshTarget {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProvidedTarget,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$State
+    )
+
+    $candidate = $ProvidedTarget.Trim()
+    if (-not $candidate -and $State.Contains('sshTarget') -and $State['sshTarget']) {
+        $candidate = [string]$State['sshTarget']
+    }
+    $candidate = $candidate.Trim()
+    if (-not $candidate) {
+        throw 'SSH target is required. Pass -SshTarget user@host or run Setup-BedJetBridge.ps1 first so data/setup-state.json includes sshTarget.'
+    }
+    return $candidate
+}
 
 function Get-NativeCommand {
     param(
@@ -57,6 +97,8 @@ function Invoke-CommandShell {
     return $text
 }
 
+$state = Get-SetupState
+$resolvedSshTarget = Resolve-SshTarget -ProvidedTarget $SshTarget -State $state
 $ssh = Get-NativeCommand -Name 'ssh'
 $remoteScript = @'
 set -e
@@ -64,7 +106,7 @@ curl -fsS http://127.0.0.1:'@ + $BridgePort + @'/v1/system
 '@
 
 $escapedRemoteScript = $remoteScript.Replace('"', '\"').Replace("`r", '').Replace("`n", '; ')
-$commandLine = '"' + $ssh + '" -o BatchMode=yes -o ConnectTimeout=8 ' + $SshTarget + ' "bash -lc ""' + $escapedRemoteScript + '"""'
+$commandLine = '"' + $ssh + '" -o BatchMode=yes -o ConnectTimeout=8 ' + $resolvedSshTarget + ' "bash -lc ""' + $escapedRemoteScript + '"""'
 $output = Invoke-CommandShell -CommandLine $commandLine
 
 $system = $output | ConvertFrom-Json

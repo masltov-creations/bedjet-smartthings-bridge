@@ -1,0 +1,16 @@
+{
+  "name": "bedjet-bridge",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local bridge service for BedJet + ESP32 + SmartThings",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "node --watch src/server.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
+
