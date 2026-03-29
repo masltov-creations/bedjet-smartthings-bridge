@@ -128,24 +128,14 @@ For a full remote bridge dry run, the mock gateway must be reachable from both y
 
 ### Wizard
 
-1. The current preferred path is the Windows PowerShell setup script.
-2. The local wizard remains in the repo, but it is secondary until rebuilt on top of the script-first flow.
+The setup-app is now **guide mode** only:
 
-## Debug Mode
-
-The setup wizard has an explicit debug mode and it defaults to `on` right now.
-It also has a `fake run` mode you can enable from the first card to rehearse the entire flow before the hardware arrives.
-
-Debug mode shows:
-
-- current step and sub-step
-- raw SSH/CLI commands
-- stdout/stderr streams
-- bridge HTTP calls
-- health checks and timing
-- saved debug bundle output
-
-It is verbose, not read-only: commands still execute unless a step explicitly offers a safe probe.
+1. It provides a clean, concise, step-by-step install checklist for the 3 pieces:
+   - Gateway (ESP32)
+   - Bridge (Ubuntu VM)
+   - SmartThings Edge driver
+2. It does not orchestrate remote mutations from the browser path.
+3. Use script-first commands for real installation and verification.
 
 ## Setup-App Quick Start
 
@@ -159,6 +149,8 @@ node src/server.mjs
 Open [http://127.0.0.1:8890](http://127.0.0.1:8890) if it does not auto-open.
 
 ### Main Endpoints
+
+These remain available for tooling/debug compatibility with prior workflow experiments:
 
 - `GET /api/setup/session`
 - `PUT /api/setup/session`
