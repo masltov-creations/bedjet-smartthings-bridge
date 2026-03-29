@@ -69,8 +69,7 @@ Do not shuffle that order unless you enjoy debugging Bluetooth and networking at
 
 ## Agent Instructions (Primary Install Path)
 
-Use this first with Codex, OpenClaw, Claude, or similar.
-Codex / OpenClaw / Claude:
+The fastest and easiest install is agent first: With Codex, OpenClaw, Claude, or similar type the following:
 ```text
 Please install this project for me: https://github.com/bedjet-smartthings-bridge
 ```
