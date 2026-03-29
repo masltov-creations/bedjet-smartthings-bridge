@@ -302,18 +302,37 @@ You need:
 
 Basic flow:
 
-1. Package the driver:
+1. Install a configured driver package (recommended, sets host/port defaults at package time):
+
+```bash
+<repo-root>/scripts/smartthings/Install-ConfiguredEdgeDriver.sh \
+  --channel-id <channel-id> \
+  --hub-id <hub-id> \
+  --bridge-host <bridge-hostname-or-ip> \
+  --bridge-fallback-ip <bridge-lan-ip> \
+  --bridge-port 8787
+```
+
+2. Alternative manual packaging path (if you are not using the helper script):
 
 ```bash
 XDG_STATE_HOME=/tmp smartthings edge:drivers:package <repo-root>/smartthings-edge
 ```
 
-2. Create or reuse a private channel.
-3. Assign the driver to that channel.
-4. Enroll the hub in that channel.
-5. Install the driver onto the hub.
-6. Configure the bridge host preference to the bridge LAN URL (example `http://bridge-host.local:8787`).
-7. Validate:
+3. Create or reuse a private channel.
+4. Assign the driver to that channel.
+5. Enroll the hub in that channel.
+6. Install the driver onto the hub.
+7. Ensure SmartThings device preferences match setup output:
+   - `bridgeHost=<SmartThings driver host from setup output>`
+   - `bridgeFallbackIp=<SmartThings bridge fallback LAN IPv4>`
+   - `bridgePort=<SmartThings driver port from setup output>`
+   - Apply to both unit devices and both launcher devices.
+   - Note: SmartThings currently does not provide a reliable non-interactive API/CLI path to bulk write Edge device preferences for existing devices. Use the app device settings when needed.
+8. Set side mapping in preferences:
+   - Left-side devices -> `side=left`
+   - Right-side devices -> `side=right`
+9. Validate:
    - Device discovery
    - Left/right command execution
    - Accurate state refresh/readback

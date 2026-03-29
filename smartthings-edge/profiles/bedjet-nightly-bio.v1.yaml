@@ -28,6 +28,16 @@ preferences:
       default: 8787
       minimum: 1
       maximum: 65535
+  - title: Bridge Fallback IP
+    name: bridgeFallbackIp
+    description: Optional LAN IPv4 fallback if bridgeHost DNS is unavailable from hub
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      default: ""
+      minLength: 0
+      maxLength: 15
   - title: Side
     name: side
     description: Logical BedJet side controlled by this launcher

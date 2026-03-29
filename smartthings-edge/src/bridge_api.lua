@@ -63,6 +63,10 @@ local function get_last_known_ip(device)
   if is_ipv4(stored) then
     return stored
   end
+  local configured_fallback = sanitize_host(device.preferences.bridgeFallbackIp)
+  if is_ipv4(configured_fallback) then
+    return configured_fallback
+  end
   return nil
 end
 
@@ -293,7 +297,7 @@ local function request_json(device, method, path, body)
       end
       return result_or_err
     end
-    last_err = tostring(result_or_err)
+    last_err = string.format("host=%s err=%s", host, tostring(result_or_err))
   end
 
   error(last_err or ("Unable to reach bridge host " .. configured_host))

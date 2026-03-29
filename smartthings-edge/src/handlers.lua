@@ -27,12 +27,12 @@ local function clamp(value, minimum, maximum)
 end
 
 local function poll_interval_seconds(device)
-  local gateway_configured = tonumber(device:get_field(fields.POLL_INTERVAL_SECONDS))
+  local gateway_configured = tonumber(device:get_field(fields.POLL_INTERVAL_SECONDS) or 0)
   if gateway_configured then
     return clamp(math.floor(gateway_configured), MIN_POLL_INTERVAL_SECONDS, MAX_POLL_INTERVAL_SECONDS)
   end
 
-  local configured = tonumber(device.preferences.pollIntervalSeconds)
+  local configured = tonumber((device.preferences and device.preferences.pollIntervalSeconds) or 0)
   if not configured then
     return DEFAULT_POLL_INTERVAL_SECONDS
   end
@@ -59,12 +59,12 @@ local function schedule_refresh_burst(device)
 end
 
 local function start_polling(device)
-  local token = (tonumber(device:get_field(fields.POLL_TOKEN)) or 0) + 1
+  local token = (tonumber(device:get_field(fields.POLL_TOKEN) or 0) or 0) + 1
   device:set_field(fields.POLL_TOKEN, token)
   local interval = poll_interval_seconds(device)
 
   local function tick()
-    if tonumber(device:get_field(fields.POLL_TOKEN)) ~= token then
+    if (tonumber(device:get_field(fields.POLL_TOKEN) or 0) or 0) ~= token then
       return
     end
     safe_refresh(device)

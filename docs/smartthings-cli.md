@@ -9,6 +9,16 @@ This repo targets a private SmartThings Edge LAN driver flow, not a cloud Schema
 
 ## Useful Commands
 
+Recommended configured install flow (repo root):
+
+```bash
+./scripts/smartthings/Install-ConfiguredEdgeDriver.sh \
+  --channel-id <channel-id> \
+  --hub-id <hub-id> \
+  --bridge-host <bridge-hostname-or-ip> \
+  --bridge-fallback-ip <bridge-lan-ip>
+```
+
 Package the driver:
 
 ```bash
