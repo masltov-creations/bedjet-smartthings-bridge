@@ -5,9 +5,12 @@ local json = require "st.json"
 local M = {}
 
 local function get_bridge_host(device)
-  local value = device.preferences.bridgeHost or "bedjet-bridge.local"
+  local value = device.preferences.bridgeHost or ""
   value = value:gsub("^https?://", "")
   value = value:gsub("/.*$", "")
+  if value == "" or value == "bridge-host-or-ip" then
+    error("Bridge host preference is not configured. Set bridgeHost to a real LAN hostname or IP.")
+  end
   return value
 end
 
