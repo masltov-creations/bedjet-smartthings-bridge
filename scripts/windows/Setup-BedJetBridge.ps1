@@ -43,6 +43,7 @@ $script:ResolvedGatewayRemoteBaseUrl = ''
 $script:ResolvedGatewayId = ''
 $script:ResolvedGatewaySharedSecret = ''
 $script:ResolvedBridgeLanUrl = ''
+$script:ResolvedSmartThingsBridgeHost = ''
 $script:ResolvedSshTarget = ''
 
 function Write-Step {
@@ -569,6 +570,56 @@ function Get-UriHost {
     return ([System.Uri]$Uri).Host
 }
 
+function Resolve-SmartThingsBridgeHost {
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$RemoteFacts,
+
+        [Parameter(Mandatory)]
+        [int]$Port
+    )
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+
+    if ($RemoteFacts.ContainsKey('host_fqdn') -and $RemoteFacts['host_fqdn']) {
+        [void]$candidates.Add([string]$RemoteFacts['host_fqdn'])
+        $short = ([string]$RemoteFacts['host_fqdn']).Split('.')[0]
+        if ($short) {
+            [void]$candidates.Add("$short.local")
+        }
+    }
+
+    if ($RemoteFacts.ContainsKey('lan_ip') -and $RemoteFacts['lan_ip']) {
+        [void]$candidates.Add([string]$RemoteFacts['lan_ip'])
+    }
+
+    $deduped = [System.Collections.Generic.List[string]]::new()
+    foreach ($candidate in $candidates) {
+        if ($candidate -and -not $deduped.Contains($candidate)) {
+            [void]$deduped.Add($candidate)
+        }
+    }
+
+    foreach ($candidate in $deduped) {
+        $health = Invoke-JsonRequest -Method 'GET' -Uri "http://$candidate`:$Port/healthz" -AllowFailure
+        if ($health -and $health.ok) {
+            return @{
+                Host = $candidate
+                Source = 'probed'
+            }
+        }
+    }
+
+    if ($RemoteFacts.ContainsKey('lan_ip') -and $RemoteFacts['lan_ip']) {
+        return @{
+            Host = [string]$RemoteFacts['lan_ip']
+            Source = 'fallback-lan-ip'
+        }
+    }
+
+    throw 'Unable to determine SmartThings bridge host target from remote facts.'
+}
+
 function Get-HmacSignature {
     param(
         [Parameter(Mandatory)]
@@ -821,11 +872,19 @@ if (-not $SkipRemote) {
         throw 'docker compose is not available on the remote host.'
     }
     $script:ResolvedBridgeLanUrl = "http://$($remoteFacts['lan_ip']):$BridgePort"
+    $smartThingsBridge = Resolve-SmartThingsBridgeHost -RemoteFacts $remoteFacts -Port $BridgePort
+    $script:ResolvedSmartThingsBridgeHost = $smartThingsBridge.Host
     Write-Ok "Remote LAN IP: $($remoteFacts['lan_ip'])"
+    if ($remoteFacts['host_fqdn']) {
+        Write-Ok "Remote host FQDN: $($remoteFacts['host_fqdn'])"
+    }
     if ($remoteFacts['tailscale_ip']) {
         Write-Ok "Remote Tailscale IP: $($remoteFacts['tailscale_ip'])"
     }
+    Write-Ok "SmartThings bridge host target: $($script:ResolvedSmartThingsBridgeHost) [$($smartThingsBridge.Source)]"
     Write-Ok 'Remote Docker looks healthy'
+} else {
+    $script:ResolvedSmartThingsBridgeHost = '127.0.0.1'
 }
 
 if ($script:ResolvedSshTarget) {
@@ -836,6 +895,7 @@ $state['gatewayRemoteBaseUrl'] = $script:ResolvedGatewayRemoteBaseUrl
 $state['gatewayId'] = $script:ResolvedGatewayId
 $state['gatewaySharedSecret'] = $script:ResolvedGatewaySharedSecret
 $state['bridgeLanUrl'] = $script:ResolvedBridgeLanUrl
+$state['smartThingsBridgeHost'] = $script:ResolvedSmartThingsBridgeHost
 $state['bridgePort'] = $BridgePort
 $state['updatedAt'] = [DateTimeOffset]::UtcNow.ToString('o')
 Save-SetupState -State $state
@@ -865,4 +925,6 @@ if (-not $SkipDeploy -and -not $SkipRemote) {
 Write-Host ''
 Write-Host '[ok] Setup script finished' -ForegroundColor Green
 Write-Host ("[ok] SmartThings bridge URL: {0}" -f $script:ResolvedBridgeLanUrl) -ForegroundColor Green
+Write-Host ("[ok] SmartThings driver host: {0}" -f $script:ResolvedSmartThingsBridgeHost) -ForegroundColor Green
+Write-Host ("[ok] SmartThings driver port: {0}" -f $BridgePort) -ForegroundColor Green
 Write-Host ("[ok] Gateway URL: {0}" -f $script:ResolvedGatewayBaseUrl) -ForegroundColor Green
