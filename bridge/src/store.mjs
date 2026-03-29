@@ -30,6 +30,28 @@ const defaultProfiles = [
     ],
     schedule: { enabled: false, localTime: "22:30", daysOfWeek: [0, 1, 2, 3, 4, 5, 6] },
     metadata: { description: "Default right-side starter profile", lastTriggeredLocalDate: null }
+  },
+  {
+    id: "left-hot-high",
+    name: "Left Hot High",
+    side: "left",
+    enabled: 1,
+    steps: [
+      { offsetMinutes: 0, command: { power: "on", mode: "heat", fanStep: 18, targetTemperatureC: 32 } }
+    ],
+    schedule: { enabled: false, localTime: "22:30", daysOfWeek: [0, 1, 2, 3, 4, 5, 6] },
+    metadata: { description: "Left-side quick launcher for hot + high", lastTriggeredLocalDate: null }
+  },
+  {
+    id: "right-hot-high",
+    name: "Right Hot High",
+    side: "right",
+    enabled: 1,
+    steps: [
+      { offsetMinutes: 0, command: { power: "on", mode: "heat", fanStep: 18, targetTemperatureC: 32 } }
+    ],
+    schedule: { enabled: false, localTime: "22:30", daysOfWeek: [0, 1, 2, 3, 4, 5, 6] },
+    metadata: { description: "Right-side quick launcher for hot + high", lastTriggeredLocalDate: null }
   }
 ];
 
@@ -301,4 +323,3 @@ export class BridgeStore {
     }
   }
 }
-

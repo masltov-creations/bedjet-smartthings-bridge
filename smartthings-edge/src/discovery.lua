@@ -24,6 +24,18 @@ local definitions = {
     label = "Right BedJet Bio",
     profile = "bedjet-nightly-bio.v1",
     model = "BedJet Right Bio"
+  },
+  {
+    device_network_id = "bedjet-hot-high-left",
+    label = "Left BedJet Hot High",
+    profile = "bedjet-nightly-bio.v1",
+    model = "BedJet Left Hot High"
+  },
+  {
+    device_network_id = "bedjet-hot-high-right",
+    label = "Right BedJet Hot High",
+    profile = "bedjet-nightly-bio.v1",
+    model = "BedJet Right Hot High"
   }
 }
 

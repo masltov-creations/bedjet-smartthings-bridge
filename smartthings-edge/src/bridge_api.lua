@@ -15,10 +15,6 @@ local function get_bridge_port(device)
   return tonumber(device.preferences.bridgePort) or 8787
 end
 
-local function profile_id_for_side(side)
-  return string.format("%s-nightly-bio", side)
-end
-
 local function receive_line(client)
   local line, err, partial = client:receive("*l")
   if line then
@@ -235,12 +231,12 @@ function M.send_target_temperature(device, side, mode, target_temperature_c)
   })
 end
 
-function M.start_profile(device, side)
-  return request_json(device, "POST", "/v1/profiles/" .. profile_id_for_side(side) .. "/start", {})
+function M.start_profile(device, profile_id)
+  return request_json(device, "POST", "/v1/profiles/" .. profile_id .. "/start", {})
 end
 
-function M.stop_profile(device, side)
-  return request_json(device, "POST", "/v1/profiles/" .. profile_id_for_side(side) .. "/stop", {})
+function M.stop_profile(device, profile_id)
+  return request_json(device, "POST", "/v1/profiles/" .. profile_id .. "/stop", {})
 end
 
 return M

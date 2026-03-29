@@ -104,7 +104,18 @@ local function detect_kind(device)
   if string.find(device.device_network_id or "", "profile") then
     return "profile"
   end
+  if string.find(device.device_network_id or "", "hot-high") then
+    return "profile"
+  end
   return "unit"
+end
+
+local function detect_profile_id(device, side)
+  local dni = device.device_network_id or ""
+  if string.find(dni, "hot-high") then
+    return string.format("%s-hot-high", side)
+  end
+  return string.format("%s-nightly-bio", side)
 end
 
 local function as_fan_level(fan_step)
@@ -165,6 +176,9 @@ function M.device_added(_, device)
   local kind = detect_kind(device)
   device:set_field(fields.SIDE, side, { persist = true })
   device:set_field(fields.KIND, kind, { persist = true })
+  if kind == "profile" then
+    device:set_field(fields.PROFILE_ID, detect_profile_id(device, side), { persist = true })
+  end
 
   emit_switch(device, false)
   if kind == "unit" then
@@ -179,14 +193,24 @@ function M.device_added(_, device)
 end
 
 function M.device_init(_, device)
-  device:set_field(fields.SIDE, detect_side(device), { persist = true })
-  device:set_field(fields.KIND, detect_kind(device), { persist = true })
+  local side = detect_side(device)
+  local kind = detect_kind(device)
+  device:set_field(fields.SIDE, side, { persist = true })
+  device:set_field(fields.KIND, kind, { persist = true })
+  if kind == "profile" then
+    device:set_field(fields.PROFILE_ID, detect_profile_id(device, side), { persist = true })
+  end
   start_polling(device)
   schedule_refresh(device, 1)
 end
 
 function M.info_changed(_, device)
-  device:set_field(fields.SIDE, detect_side(device), { persist = true })
+  local side = detect_side(device)
+  local kind = detect_kind(device)
+  device:set_field(fields.SIDE, side, { persist = true })
+  if kind == "profile" then
+    device:set_field(fields.PROFILE_ID, detect_profile_id(device, side), { persist = true })
+  end
   start_polling(device)
 end
 
@@ -226,9 +250,10 @@ function M.switch_on(_, device)
   local kind = device:get_field(fields.KIND) or detect_kind(device)
 
   if kind == "profile" then
-    local ok, err = pcall(api.start_profile, device, side)
+    local profile_id = device:get_field(fields.PROFILE_ID) or detect_profile_id(device, side)
+    local ok, err = pcall(api.start_profile, device, profile_id)
     if not ok then
-      log.warn(string.format("switch_on profile failed for %s: %s", side, tostring(err)))
+      log.warn(string.format("switch_on profile failed for %s (%s): %s", side, profile_id, tostring(err)))
     end
     schedule_refresh_burst(device)
     return
@@ -246,9 +271,10 @@ function M.switch_off(_, device)
   local kind = device:get_field(fields.KIND) or detect_kind(device)
 
   if kind == "profile" then
-    local ok, err = pcall(api.stop_profile, device, side)
+    local profile_id = device:get_field(fields.PROFILE_ID) or detect_profile_id(device, side)
+    local ok, err = pcall(api.stop_profile, device, profile_id)
     if not ok then
-      log.warn(string.format("switch_off profile failed for %s: %s", side, tostring(err)))
+      log.warn(string.format("switch_off profile failed for %s (%s): %s", side, profile_id, tostring(err)))
     end
     schedule_refresh_burst(device)
     return
