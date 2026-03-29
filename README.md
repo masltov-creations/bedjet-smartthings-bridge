@@ -4,9 +4,9 @@
 
 This project connects two BedJet units to SmartThings with:
 
-1. A gateway that talks to your BedJet throubh Bluetooth. This is the `ESP32-S3 Gateway`.
-2. A bridge that connects it to SmartThings. This is our `Bridge Service` that runs on Linux host (Docker).
-3. An Edge driver so SmartThings knows how to talk to to it. This is our `SmartThings Edge Driver` that is installed on to your ST hub.
+1. A gateway that talks to your BedJet through Bluetooth. This is the `ESP32-S3 Gateway`.
+2. A bridge that connects the gateway to SmartThings. This is our `Bridge Service` that runs on a Linux host (Docker).
+3. An Edge driver so SmartThings knows how to talk to the bridge. This is our `SmartThings Edge Driver` that is installed on to your ST hub.
 
 Think of it as a translator stack: SmartThings speaks LAN, BedJet speaks BLE, and the bridge keeps everyone from arguing about state.
 
