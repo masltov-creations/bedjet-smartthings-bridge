@@ -10,8 +10,6 @@ This project connects two BedJet units to SmartThings with:
 
 Think of it as a translator stack: SmartThings speaks LAN, BedJet speaks BLE, and the bridge keeps everyone from arguing about state.
 
-GitHub does render Mermaid diagrams in Markdown files, so this should show up directly in the repo UI.
-
 ```mermaid
 flowchart LR
     ST["SmartThings App"] --> HUB["SmartThings Hub"]
