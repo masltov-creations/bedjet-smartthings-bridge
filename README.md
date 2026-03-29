@@ -10,6 +10,12 @@ This project connects two BedJet units to SmartThings with:
 
 Think of it as a translator stack: SmartThings speaks LAN, BedJet speaks BLE, and the bridge keeps everyone from arguing about state.
 
+What it does:
+
+- Controls up to two BedJet units from SmartThings.
+- Keeps SmartThings state tied to actual BedJet readback instead of wishful thinking.
+- Gives you a local gateway UI for pairing, checks, Wi-Fi maintenance, indicator control, and OTA updates.
+
 ```mermaid
 flowchart LR
     subgraph EXISTING["Already In Your World"]
@@ -79,21 +85,6 @@ Do not assume SSH tunnels.
 Stop on first failure with the exact command, stderr, and the fix.
 Do not print or commit secrets.
 
-
-## What Changed In This Beta
-
-If you saw an earlier draft, this is the cleaned-up shape:
-
-- The install path is now centered on the real three-piece stack: gateway firmware, bridge service, and SmartThings Edge driver.
-- The unfinished web wizard is no longer part of the supported flow.
-- Bridge and gateway targets are explicit inputs or saved local state, not hidden personal defaults.
-- The bridge now exposes `GET /readyz` and `GET /v1/version` and refuses weak live config at startup.
-- The bridge now rejects oversized JSON requests instead of reading unbounded payloads.
-- Gateway setup now supports a fast flash-time Wi-Fi preseed path for first boot.
-- Gateway Wi-Fi changes after claim now use a signed maintenance flow instead of casual open-ended changes.
-- Gateway web UI now includes a subtle RGB activity light with a user-facing on/off toggle.
-- OTA support now includes version/attestation visibility plus a signed rollback path when the alternate slot is available.
-- Docs are now portable, agent-friendly, and scrubbed of environment-specific paths and secrets.
 
 ## Connectivity Requirements (Must Be True)
 
@@ -362,6 +353,22 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Setup-BedJetBridge.ps
 cd <repo-root>/bridge && node --test
 cd <repo-root>/mock-gateway && node --test
 ```
+
+## Release Notes
+
+<details>
+<summary>Recent beta highlights</summary>
+
+- Supports the full three-piece install directly: gateway firmware, bridge service, and SmartThings Edge driver.
+- Bridge exposes `GET /readyz` and `GET /v1/version` for health and version checks.
+- Bridge rejects oversized JSON payloads and refuses weak live config at startup.
+- Gateway supports flash-time Wi-Fi preseed for first boot.
+- Gateway supports signed Wi-Fi updates after claim for deliberate maintenance changes.
+- Gateway web UI includes an optional activity light toggle for the built-in RGB LED.
+- OTA reports build/attestation status and supports signed rollback when the alternate slot is available.
+- Install docs are portable and agent-friendly, with no machine-specific paths or published secrets.
+
+</details>
 
 ## References
 
