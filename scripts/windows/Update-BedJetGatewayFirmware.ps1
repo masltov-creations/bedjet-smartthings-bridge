@@ -289,9 +289,11 @@ try {
         '-F', "firmware=@$resolvedFirmwarePath;type=application/octet-stream",
         $updateUri
     )
+    $global:LASTEXITCODE = 0
     $raw = & $curl @curlArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "curl upload failed with exit code $LASTEXITCODE"
+    $curlExitCode = $global:LASTEXITCODE
+    if ($curlExitCode -ne 0) {
+        throw "curl upload failed with exit code $curlExitCode"
     }
     if ($raw) {
         Write-Host $raw

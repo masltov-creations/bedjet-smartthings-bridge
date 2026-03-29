@@ -312,9 +312,7 @@ function Test-CommandVersion {
     )
 
     $path = Get-NativeCommand -Name $Name
-    $versionArgsText = ($VersionArgs | ForEach-Object { $_ }) -join ' '
-    $commandLine = '"' + $path + '" ' + $versionArgsText + ' 2>&1'
-    $result = Invoke-CommandShell -CommandLine $commandLine -AllowFailure
+    $result = Invoke-Native -FilePath $path -ArgumentList $VersionArgs -AllowFailure
 
     [pscustomobject]@{
         Name = $Name
