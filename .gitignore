@@ -12,6 +12,7 @@ bridge-data/
 data/*.json
 
 firmware/.pio/
+firmware/include/wifi_secrets.h
 
 *.log
 .DS_Store

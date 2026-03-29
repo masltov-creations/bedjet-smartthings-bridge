@@ -13,7 +13,10 @@ param(
     [string]$FirmwarePath = '',
 
     [Parameter()]
-    [switch]$UseRemoteBaseUrl
+    [switch]$UseRemoteBaseUrl,
+
+    [Parameter()]
+    [switch]$RollbackOnFailedAttestation
 )
 
 Set-StrictMode -Version Latest
@@ -72,9 +75,10 @@ function New-SignedHeaders {
     param(
         [Parameter(Mandatory)][string]$GatewayId,
         [Parameter(Mandatory)][string]$SharedSecret,
+        [Parameter()][ValidateSet('GET', 'POST')][string]$Method = 'POST',
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$BodyMarker,
-        [Parameter(Mandatory)][string]$FirmwareSha256
+        [Parameter()][string]$BodyMarker = '',
+        [Parameter()][string]$FirmwareSha256 = ''
     )
 
     $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds().ToString()
@@ -88,16 +92,19 @@ function New-SignedHeaders {
     }
 
     $nonce = ([System.BitConverter]::ToString($nonceBytes)).Replace('-', '').ToLowerInvariant()
-    $message = @('POST', $Path, $BodyMarker, $timestamp, $nonce) -join "`n"
+    $message = @($Method.ToUpperInvariant(), $Path, $BodyMarker, $timestamp, $nonce) -join "`n"
     $signature = Get-HmacSignature -Secret $SharedSecret -Message $message
 
-    return @{
+    $headers = @{
         'X-Gateway-Id' = $GatewayId
         'X-Timestamp' = $timestamp
         'X-Nonce' = $nonce
         'X-Signature' = $signature
-        'X-Firmware-SHA256' = $FirmwareSha256
     }
+    if ($FirmwareSha256) {
+        $headers['X-Firmware-SHA256'] = $FirmwareSha256
+    }
+    return $headers
 }
 
 function Get-GatewayVersion {
@@ -131,6 +138,49 @@ function Wait-GatewayOnline {
     }
 
     throw "Gateway did not come back online within $($Attempts * $DelaySeconds) seconds."
+}
+
+function Invoke-GatewayRollback {
+    param(
+        [Parameter(Mandatory)][string]$BaseUrl,
+        [Parameter(Mandatory)][string]$GatewayId,
+        [Parameter(Mandatory)][string]$SharedSecret,
+        [Parameter()][string]$ExpectedPriorBuild = ''
+    )
+
+    Write-Step 'Step 5: signed rollback'
+    $rollbackPath = '/api/v1/firmware/rollback'
+    $headers = New-SignedHeaders -GatewayId $GatewayId -SharedSecret $SharedSecret -Path $rollbackPath
+    $rollback = Invoke-RestMethod -Method POST -Uri ($BaseUrl + $rollbackPath) -Headers $headers -TimeoutSec 8
+    if (-not $rollback.ok) {
+        throw 'Gateway rollback request did not report success.'
+    }
+    Write-Ok 'Gateway accepted rollback and is restarting'
+
+    Wait-GatewayOnline -BaseUrl $BaseUrl
+    Start-Sleep -Seconds 2
+
+    $afterRollback = $null
+    for ($attempt = 1; $attempt -le 20; $attempt += 1) {
+        $afterRollback = Get-GatewayVersion -BaseUrl $BaseUrl
+        if ($afterRollback -and $afterRollback.firmware -and ([string]$afterRollback.firmware.ota.lastStatus -in @('rolled-back', 'rolled-back-pending-reboot'))) {
+            break
+        }
+        Start-Sleep -Seconds 2
+    }
+
+    if (-not $afterRollback -or -not $afterRollback.firmware -or ([string]$afterRollback.firmware.ota.lastStatus -notin @('rolled-back', 'rolled-back-pending-reboot'))) {
+        throw 'Gateway rollback did not attest cleanly.'
+    }
+
+    $rolledBackBuild = [string]$afterRollback.firmware.buildId
+    $rollbackStatus = [string]$afterRollback.firmware.ota.lastStatus
+    Write-Ok "Gateway rollback attested with OTA status '$rollbackStatus'"
+    if ($ExpectedPriorBuild -and $rolledBackBuild -eq $ExpectedPriorBuild) {
+        Write-Ok "Gateway build returned to prior build '$rolledBackBuild'"
+    } elseif ($rolledBackBuild) {
+        Write-Ok "Gateway build after rollback: '$rolledBackBuild'"
+    }
 }
 
 function Get-CurlPath {
@@ -207,10 +257,12 @@ if ($beforeVersion -and $beforeVersion.firmware -and $beforeVersion.firmware.bui
     $beforeBuild = [string]$beforeVersion.firmware.buildId
     $beforeSketchMd5 = [string]$beforeVersion.firmware.sketchMd5
     $beforeBootCount = [int]$beforeVersion.firmware.bootCount
+    $beforeCanRollback = [bool]$beforeVersion.firmware.canRollback
     Write-Ok "Current firmware build: $beforeBuild"
     if ($beforeSketchMd5) {
         Write-Ok "Current firmware sketch MD5: $beforeSketchMd5"
     }
+    Write-Ok ("Rollback available before update: {0}" -f ($beforeCanRollback ? 'Yes' : 'No'))
 } else {
     Write-Host '[wait] Version endpoint unavailable on current firmware; post-update attestation will rely on health + OTA status fields when available.' -ForegroundColor Yellow
 }
@@ -295,6 +347,10 @@ for ($attempt = 1; $attempt -le 30; $attempt += 1) {
 }
 
 if (-not $attested) {
+    if ($RollbackOnFailedAttestation) {
+        Invoke-GatewayRollback -BaseUrl $resolvedGatewayBaseUrl -GatewayId $resolvedGatewayId -SharedSecret $resolvedGatewaySharedSecret -ExpectedPriorBuild $beforeBuild
+        throw 'Gateway OTA attestation did not converge; automatic rollback completed.'
+    }
     throw 'Gateway OTA attestation did not converge (status/sha/bootCount mismatch).'
 }
 
@@ -303,6 +359,7 @@ $afterSketchMd5 = [string]$afterVersion.firmware.sketchMd5
 $afterStatus = [string]$afterVersion.firmware.ota.lastStatus
 $afterSha = [string]$afterVersion.firmware.ota.lastSha256
 $afterBootCount = [int]$afterVersion.firmware.bootCount
+$afterCanRollback = [bool]$afterVersion.firmware.canRollback
 
 if ($beforeVersion -and $beforeVersion.firmware) {
     $beforeBuild = [string]$beforeVersion.firmware.buildId
@@ -326,3 +383,4 @@ if (-not $afterSketchMd5) {
     throw 'Gateway firmware sketch MD5 is missing; attestation incomplete.'
 }
 Write-Ok 'Gateway OTA attestation passed (status + SHA256).'
+Write-Ok ("Rollback available after update: {0}" -f ($afterCanRollback ? 'Yes' : 'No'))

@@ -1,4 +1,5 @@
 import http from "node:http";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { config as defaultConfig } from "./config.mjs";
@@ -8,14 +9,47 @@ import { FirmwareClient } from "./firmware-client.mjs";
 import { ProfileEngine } from "./profile-engine.mjs";
 
 const allowedSides = new Set(["left", "right"]);
+const currentFile = fileURLToPath(import.meta.url);
+const currentDir = path.dirname(currentFile);
+const bridgePackage = JSON.parse(fs.readFileSync(path.resolve(currentDir, "../package.json"), "utf8"));
+const maxJsonBodyBytes = 16 * 1024;
+
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
 
 const parseBody = async (request) => {
+  const contentLengthHeader = request.headers["content-length"];
+  if (contentLengthHeader) {
+    const contentLength = Number.parseInt(contentLengthHeader, 10);
+    if (Number.isFinite(contentLength) && contentLength > maxJsonBodyBytes) {
+      throw new HttpError(413, `JSON body exceeds ${maxJsonBodyBytes} bytes`);
+    }
+  }
+
   const chunks = [];
+  let totalBytes = 0;
   for await (const chunk of request) {
+    totalBytes += chunk.length;
+    if (totalBytes > maxJsonBodyBytes) {
+      throw new HttpError(413, `JSON body exceeds ${maxJsonBodyBytes} bytes`);
+    }
     chunks.push(chunk);
   }
   const text = Buffer.concat(chunks).toString("utf8");
-  return text ? JSON.parse(text) : {};
+  if (!text) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new HttpError(400, "Invalid JSON body");
+  }
 };
 
 const sendJson = (response, statusCode, payload) => {
@@ -88,6 +122,84 @@ const getSynchronizedGatewayState = async ({ store, firmware }) => {
   return gatewayState;
 };
 
+export const validateRuntimeConfig = (runtimeConfig) => {
+  if (!Number.isInteger(runtimeConfig.port) || runtimeConfig.port < 0 || runtimeConfig.port > 65535) {
+    throw new Error("PORT must be an integer between 0 and 65535");
+  }
+
+  if (!Number.isInteger(runtimeConfig.schedulerIntervalMs) || runtimeConfig.schedulerIntervalMs < 1_000) {
+    throw new Error("SCHEDULER_INTERVAL_MS must be at least 1000");
+  }
+
+  if (runtimeConfig.simulateFirmware) {
+    return runtimeConfig;
+  }
+
+  const missing = [];
+  if (!runtimeConfig.firmwareApiBaseUrl) {
+    missing.push("FIRMWARE_API_BASE_URL");
+  }
+  if (!runtimeConfig.firmwareGatewayId) {
+    missing.push("FIRMWARE_GATEWAY_ID");
+  }
+  if (!runtimeConfig.firmwareSharedSecret) {
+    missing.push("FIRMWARE_SHARED_SECRET");
+  }
+  if (missing.length > 0) {
+    throw new Error(`Missing required live bridge config: ${missing.join(", ")}`);
+  }
+
+  try {
+    const url = new URL(runtimeConfig.firmwareApiBaseUrl);
+    if (!["http:", "https:"].includes(url.protocol)) {
+      throw new Error("bad protocol");
+    }
+  } catch {
+    throw new Error("FIRMWARE_API_BASE_URL must be a valid http or https URL");
+  }
+
+  if (runtimeConfig.firmwareSharedSecret.length < 16) {
+    throw new Error("FIRMWARE_SHARED_SECRET must be at least 16 characters in live mode");
+  }
+
+  return runtimeConfig;
+};
+
+const buildVersionSnapshot = (runtimeConfig) => ({
+  ok: true,
+  service: "bedjet-bridge",
+  version: bridgePackage.version,
+  nodeVersion: process.version,
+  simulateFirmware: runtimeConfig.simulateFirmware
+});
+
+const buildReadinessSnapshot = async ({ runtimeConfig, firmware }) => {
+  try {
+    const gatewayClaim = await firmware.getClaimStatus();
+    const gatewayState = await firmware.getState();
+    return {
+      ok: Boolean(gatewayClaim?.claimed),
+      service: "bedjet-bridge",
+      version: bridgePackage.version,
+      simulateFirmware: runtimeConfig.simulateFirmware,
+      gatewayReachable: true,
+      gatewayClaimed: Boolean(gatewayClaim?.claimed),
+      gatewayId: gatewayClaim?.gatewayId || "",
+      pairedSides: ["left", "right"].filter((side) => Boolean(gatewayState?.sides?.[side]?.paired))
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      service: "bedjet-bridge",
+      version: bridgePackage.version,
+      simulateFirmware: runtimeConfig.simulateFirmware,
+      gatewayReachable: false,
+      gatewayClaimed: false,
+      error: error.message
+    };
+  }
+};
+
 const buildSystemSnapshot = async ({ runtimeConfig, store, firmware, engine }) => {
   const gatewayState = await getSynchronizedGatewayState({ store, firmware });
   return {
@@ -110,7 +222,7 @@ const buildSystemSnapshot = async ({ runtimeConfig, store, firmware, engine }) =
 };
 
 export const createBridgeServer = (options = {}) => {
-  const runtimeConfig = { ...defaultConfig, ...(options.config || {}) };
+  const runtimeConfig = validateRuntimeConfig({ ...defaultConfig, ...(options.config || {}) });
   const logger = options.logger || defaultLogger;
   const store = new BridgeStore(runtimeConfig.dataPath);
   const firmware = new FirmwareClient({ ...runtimeConfig, logger });
@@ -128,6 +240,17 @@ export const createBridgeServer = (options = {}) => {
 
       if (request.method === "GET" && url.pathname === "/healthz") {
         sendJson(response, 200, { ok: true, service: "bedjet-bridge" });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/readyz") {
+        const readiness = await buildReadinessSnapshot({ runtimeConfig, firmware });
+        sendJson(response, readiness.ok ? 200 : 503, readiness);
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/v1/version") {
+        sendJson(response, 200, buildVersionSnapshot(runtimeConfig));
         return;
       }
 
@@ -290,8 +413,6 @@ export const createBridgeServer = (options = {}) => {
     }
   };
 };
-
-const currentFile = fileURLToPath(import.meta.url);
 if (process.argv[1] && path.resolve(process.argv[1]) === currentFile) {
   const app = createBridgeServer();
   app.start().catch((error) => {

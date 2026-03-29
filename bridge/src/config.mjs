@@ -34,8 +34,8 @@ export const config = Object.freeze({
   port: parseInteger(process.env.PORT, 8787),
   timezone: process.env.TIMEZONE || "America/Los_Angeles",
   dataPath: resolvePath(process.env.DATA_PATH, "./data/bridge.sqlite"),
-  firmwareApiBaseUrl: (process.env.FIRMWARE_API_BASE_URL || "http://bedjet-gateway.local").replace(/\/$/, ""),
-  firmwareGatewayId: process.env.FIRMWARE_GATEWAY_ID || "bedjet-bridge",
+  firmwareApiBaseUrl: (process.env.FIRMWARE_API_BASE_URL || "").replace(/\/$/, ""),
+  firmwareGatewayId: process.env.FIRMWARE_GATEWAY_ID || "",
   firmwareSharedSecret: process.env.FIRMWARE_SHARED_SECRET || "",
   simulateFirmware: parseBoolean(process.env.SIMULATE_FIRMWARE, false),
   schedulerIntervalMs: parseInteger(process.env.SCHEDULER_INTERVAL_MS, 30_000)

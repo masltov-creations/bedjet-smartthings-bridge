@@ -10,6 +10,12 @@
 #include <mbedtls/sha256.h>
 #include <vector>
 
+#ifdef __has_include
+#if __has_include("wifi_secrets.h")
+#include "wifi_secrets.h"
+#endif
+#endif
+
 #ifndef WIFI_SSID
 #define WIFI_SSID ""
 #endif
@@ -22,6 +28,14 @@
 #define MDNS_HOSTNAME "bedjet-gateway"
 #endif
 
+#ifndef BEDJET_ACTIVITY_RGB_PIN
+#ifdef RGB_BUILTIN
+#define BEDJET_ACTIVITY_RGB_PIN RGB_BUILTIN
+#else
+#define BEDJET_ACTIVITY_RGB_PIN 48
+#endif
+#endif
+
 #ifndef BEDJET_SIMULATED_BACKEND
 #define BEDJET_SIMULATED_BACKEND 1
 #endif
@@ -30,7 +44,8 @@ namespace {
 
 constexpr const char *kPreferenceNamespace = "bedjet";
 constexpr uint16_t kHttpPort = 80;
-constexpr size_t kNonceCacheSize = 8;
+constexpr size_t kNonceCacheSize = 64;
+constexpr size_t kMaxJsonBodyBytes = 4096;
 constexpr const char *kSetupApSsid = "BedJetGatewaySetup";
 constexpr const char *kBedJetServiceUuid = "00001000-bed0-0080-aa55-4265644a6574";
 constexpr const char *kBedJetStatusUuid = "00002000-bed0-0080-aa55-4265644a6574";
@@ -41,6 +56,8 @@ constexpr uint32_t kFirmwareApiVersion = 3;
 constexpr int kDefaultSmartThingsPollIntervalSeconds = 15;
 constexpr int kMinSmartThingsPollIntervalSeconds = 5;
 constexpr int kMaxSmartThingsPollIntervalSeconds = 120;
+constexpr int kActivityLightPin = BEDJET_ACTIVITY_RGB_PIN;
+constexpr bool kActivityLightAvailable = kActivityLightPin >= 0;
 
 enum BedjetButton : uint8_t {
   BTN_OFF = 0x1,
@@ -106,6 +123,23 @@ struct WiFiConfigState {
   String hostname;
 };
 
+struct ActivityLightConfigState {
+  bool enabled = true;
+};
+
+struct RgbColor {
+  uint8_t red = 0;
+  uint8_t green = 0;
+  uint8_t blue = 0;
+};
+
+struct ActivityLightPulseState {
+  bool active = false;
+  RgbColor color;
+  unsigned long startedAtMs = 0;
+  unsigned long durationMs = 0;
+};
+
 struct ScanCandidate {
   String deviceId;
   String displayName;
@@ -118,6 +152,8 @@ SideState leftState;
 SideState rightState;
 AuthState authState;
 WiFiConfigState wifiConfig;
+ActivityLightConfigState activityLightConfig;
+ActivityLightPulseState activityLightPulse;
 int smartthingsPollIntervalSeconds = kDefaultSmartThingsPollIntervalSeconds;
 bool mdnsStarted = false;
 bool restartScheduled = false;
@@ -155,9 +191,19 @@ BLERemoteCharacteristic *activeStatusChar = nullptr;
 BLERemoteCharacteristic *activeNameChar = nullptr;
 std::string lastStatusNotification;
 unsigned long lastStatusNotificationAtMs = 0;
+int lastJsonBodyErrorStatus = 400;
+String lastJsonBodyError = "invalid json";
 
 bool useSimulatedBackend() {
   return BEDJET_SIMULATED_BACKEND == 1;
+}
+
+RgbColor makeRgbColor(uint8_t red, uint8_t green, uint8_t blue) {
+  RgbColor color;
+  color.red = red;
+  color.green = green;
+  color.blue = blue;
+  return color;
 }
 
 int clampSmartThingsPollIntervalSeconds(int value) {
@@ -227,6 +273,14 @@ void saveWiFiConfig() {
   preferences.putString("wifi.hostname", wifiConfig.hostname);
 }
 
+void loadActivityLightConfig() {
+  activityLightConfig.enabled = preferences.getBool("ui.activityLed", true);
+}
+
+void saveActivityLightConfig() {
+  preferences.putBool("ui.activityLed", activityLightConfig.enabled);
+}
+
 void loadSmartThingsConfig() {
   const int configured = preferences.getInt("st.pollSec", kDefaultSmartThingsPollIntervalSeconds);
   smartthingsPollIntervalSeconds = clampSmartThingsPollIntervalSeconds(configured);
@@ -250,6 +304,106 @@ void saveOtaPersistState() {
   preferences.putString("ota.lastSha", otaPersistState.lastSha256);
   preferences.putString("ota.lastErr", otaPersistState.lastError);
   preferences.putString("ota.lastAt", otaPersistState.lastAttemptAt);
+}
+
+void writeActivityLightRaw(const RgbColor &color) {
+  if (!kActivityLightAvailable) {
+    return;
+  }
+  neopixelWrite(kActivityLightPin, color.red, color.green, color.blue);
+}
+
+void clearActivityLight() {
+  activityLightPulse.active = false;
+  writeActivityLightRaw(makeRgbColor(0, 0, 0));
+}
+
+void signalActivityLight(const RgbColor &color, unsigned long durationMs = 900) {
+  if (!activityLightConfig.enabled || !kActivityLightAvailable) {
+    return;
+  }
+  activityLightPulse.active = true;
+  activityLightPulse.color = color;
+  activityLightPulse.startedAtMs = millis();
+  activityLightPulse.durationMs = durationMs;
+}
+
+void tickActivityLight() {
+  if (!kActivityLightAvailable) {
+    return;
+  }
+
+  if (!activityLightConfig.enabled) {
+    writeActivityLightRaw(makeRgbColor(0, 0, 0));
+    activityLightPulse.active = false;
+    return;
+  }
+
+  if (!activityLightPulse.active) {
+    return;
+  }
+
+  const unsigned long elapsed = millis() - activityLightPulse.startedAtMs;
+  if (elapsed >= activityLightPulse.durationMs) {
+    clearActivityLight();
+    return;
+  }
+
+  const unsigned long riseMs = activityLightPulse.durationMs / 3;
+  const unsigned long fadeMs = activityLightPulse.durationMs - riseMs;
+  long brightness = 0;
+
+  if (elapsed <= riseMs) {
+    brightness = map(static_cast<long>(elapsed), 0L, static_cast<long>(riseMs == 0 ? 1 : riseMs), 10L, 84L);
+  } else {
+    const unsigned long fadeElapsed = elapsed - riseMs;
+    brightness = map(static_cast<long>(fadeElapsed), 0L, static_cast<long>(fadeMs == 0 ? 1 : fadeMs), 84L, 0L);
+  }
+
+  RgbColor scaled = makeRgbColor(
+      static_cast<uint8_t>((static_cast<uint16_t>(activityLightPulse.color.red) * brightness) / 255),
+      static_cast<uint8_t>((static_cast<uint16_t>(activityLightPulse.color.green) * brightness) / 255),
+      static_cast<uint8_t>((static_cast<uint16_t>(activityLightPulse.color.blue) * brightness) / 255));
+  writeActivityLightRaw(scaled);
+}
+
+RgbColor colorForCommandActivity(const SideStatus &before, const SideStatus &after, const JsonDocument &body) {
+  if (after.power.equalsIgnoreCase("off")) {
+    return makeRgbColor(255, 132, 0);
+  }
+
+  if (body["targetTemperatureC"].is<int>()) {
+    if (after.targetTemperatureC > before.targetTemperatureC) {
+      return makeRgbColor(255, 48, 0);
+    }
+    if (after.targetTemperatureC < before.targetTemperatureC) {
+      return makeRgbColor(0, 96, 255);
+    }
+  }
+
+  if (body["fanStep"].is<int>()) {
+    if (after.fanStep > before.fanStep) {
+      return makeRgbColor(255, 60, 0);
+    }
+    if (after.fanStep < before.fanStep) {
+      return makeRgbColor(0, 128, 255);
+    }
+  }
+
+  if (after.mode.equalsIgnoreCase("heat") || after.mode.equalsIgnoreCase("extheat")) {
+    return makeRgbColor(255, 40, 0);
+  }
+  if (after.mode.equalsIgnoreCase("cool") || after.mode.equalsIgnoreCase("dry")) {
+    return makeRgbColor(0, 96, 255);
+  }
+  if (after.mode.equalsIgnoreCase("turbo")) {
+    return makeRgbColor(180, 120, 255);
+  }
+  if (after.power.equalsIgnoreCase("on")) {
+    return makeRgbColor(170, 170, 170);
+  }
+
+  return makeRgbColor(180, 180, 180);
 }
 
 String effectiveHostname() {
@@ -821,11 +975,24 @@ SideState &sideState(const String &side) {
 }
 
 bool parseJsonBody(JsonDocument &doc) {
+  lastJsonBodyErrorStatus = 400;
+  lastJsonBodyError = "invalid json";
   if (!server.hasArg("plain")) {
+    lastJsonBodyError = "missing json body";
     return false;
   }
-  const DeserializationError error = deserializeJson(doc, server.arg("plain"));
+  const String body = server.arg("plain");
+  if (body.length() > kMaxJsonBodyBytes) {
+    lastJsonBodyErrorStatus = 413;
+    lastJsonBodyError = String("json body exceeds ") + String(kMaxJsonBodyBytes) + " bytes";
+    return false;
+  }
+  const DeserializationError error = deserializeJson(doc, body);
   return !error;
+}
+
+void sendJsonBodyError() {
+  server.send(lastJsonBodyErrorStatus, "application/json", String("{\"error\":\"") + lastJsonBodyError + "\"}");
 }
 
 void addSlot(JsonObject object, const PairSlot &slot, const SideStatus &status) {
@@ -873,6 +1040,11 @@ void addSmartThingsConfig(JsonObject object) {
   object["pollIntervalSeconds"] = smartthingsPollIntervalSeconds;
 }
 
+void addIndicatorConfig(JsonObject object) {
+  object["activityLightEnabled"] = activityLightConfig.enabled;
+  object["activityLightAvailable"] = kActivityLightAvailable;
+}
+
 bool isClaimRoute() {
   return server.uri() == "/api/v1/claim/status" || server.uri() == "/api/v1/claim";
 }
@@ -883,6 +1055,10 @@ bool isProvisionRoute() {
 
 bool isLocalAdminRoute() {
   return server.uri().startsWith("/api/v1/local/");
+}
+
+bool provisioningRequiresAuth() {
+  return authState.claimed && isStationConnected();
 }
 
 bool requestRequiresAuth() {
@@ -970,7 +1146,7 @@ void handleClaim() {
 
   JsonDocument body;
   if (!parseJsonBody(body)) {
-    server.send(400, "application/json", "{\"error\":\"invalid json\"}");
+    sendJsonBodyError();
     return;
   }
 
@@ -1005,13 +1181,15 @@ void handleProvisionStatus() {
   claim["claimed"] = authState.claimed;
   claim["gatewayId"] = authState.gatewayId;
   claim["claimedAt"] = authState.claimedAt;
+  JsonObject provisioning = doc["provisioning"].to<JsonObject>();
+  provisioning["authRequired"] = provisioningRequiresAuth();
   writeJsonResponse(200, doc);
 }
 
 void handleProvisionSave() {
   JsonDocument body;
   if (!parseJsonBody(body)) {
-    server.send(400, "application/json", "{\"error\":\"invalid json\"}");
+    sendJsonBodyError();
     return;
   }
 
@@ -1153,6 +1331,7 @@ String buildGatewayPage() {
       .dot.good { background: var(--success); }
       label { display: block; margin: 12px 0 6px; font-weight: 600; }
       input, select { width: 100%; box-sizing: border-box; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; font: inherit; background: #fff; }
+      input[type="checkbox"] { width: auto; padding: 0; }
       button { border: 0; border-radius: 999px; padding: 10px 14px; font: inherit; font-weight: 700; cursor: pointer; background: var(--accent); color: white; }
       button.secondary { background: var(--accent-2); }
       button.subtle { background: #eef2f4; color: var(--ink); }
@@ -1163,6 +1342,7 @@ String buildGatewayPage() {
       pre { margin: 0; background: #172026; color: #edf3f6; padding: 14px; border-radius: 14px; overflow: auto; max-height: 280px; }
       .section-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
       .muted { color: var(--muted); }
+      .toggle { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
     </style>
   </head>
   <body>
@@ -1188,6 +1368,7 @@ String buildGatewayPage() {
         <section class="card">
           <h2>Wi-Fi</h2>
           <p>Update Wi-Fi credentials and hostname.</p>
+          <p id="wifiNotice" class="muted"></p>
           <form id="wifiForm">
             <label for="ssid">Wi-Fi name</label>
             <input id="ssid" name="ssid" required />
@@ -1204,6 +1385,16 @@ String buildGatewayPage() {
             <label for="pollIntervalSeconds">Poll interval seconds</label>
             <input id="pollIntervalSeconds" name="pollIntervalSeconds" type="number" min="5" max="120" value="15" required />
             <button class="secondary" type="submit">Save SmartThings Settings</button>
+          </form>
+          <hr style="margin: 16px 0; border: 0; border-top: 1px solid var(--border);" />
+          <h3>Activity Light</h3>
+          <p>Give the built-in RGB light a subtle pulse on confirmed actions. Cool or lower trends lean blue; warmer or higher trends lean red.</p>
+          <form id="lightingForm">
+            <label class="toggle" for="activityLightEnabled">
+              <input id="activityLightEnabled" name="activityLightEnabled" type="checkbox" />
+              <span>Enable activity light</span>
+            </label>
+            <button class="secondary" type="submit">Save Light Settings</button>
           </form>
         </section>
       </div>
@@ -1272,7 +1463,9 @@ String buildGatewayPage() {
       const scanBtn = document.getElementById('scanBtn');
       const releaseAllBtn = document.getElementById('releaseAllBtn');
       const wifiForm = document.getElementById('wifiForm');
+      const wifiNotice = document.getElementById('wifiNotice');
       const smartthingsForm = document.getElementById('smartthingsForm');
+      const lightingForm = document.getElementById('lightingForm');
       let lastScan = [];
 
       function escapeHtml(value) {
@@ -1291,12 +1484,15 @@ String buildGatewayPage() {
         const apiVersion = firmware.apiVersion || 'n/a';
         const buildId = firmware.buildId || 'n/a';
         const pollIntervalSeconds = data.smartthings?.pollIntervalSeconds || 15;
+        const activityLightAvailable = !!data.indicators?.activityLightAvailable;
+        const activityLightEnabled = !!data.indicators?.activityLightEnabled;
         items.push(`<span class="pill"><span class="dot ${networkGood ? 'good' : ''}"></span>${networkGood ? 'On Wi-Fi' : 'Setup AP'}</span>`);
         items.push(`<span class="pill">Hostname: <span class="mono">${escapeHtml(data.network?.hostname || 'bedjet-gateway')}</span></span>`);
         items.push(`<span class="pill">Claimed: <strong>${data.claim?.claimed ? 'Yes' : 'No'}</strong></span>`);
         items.push(`<span class="pill">Backend: <strong>${data.simulatedBackend ? 'Simulated' : 'BLE'}</strong></span>`);
         items.push(`<span class="pill">Version: <span class="mono">v${escapeHtml(apiVersion)}</span> · Build: <span class="mono">${escapeHtml(buildId)}</span></span>`);
         items.push(`<span class="pill">SmartThings Poll: <span class="mono">${escapeHtml(pollIntervalSeconds)}s</span></span>`);
+        items.push(`<span class="pill">Activity Light: <strong>${activityLightAvailable ? (activityLightEnabled ? 'On' : 'Off') : 'Unavailable'}</strong></span>`);
         summaryNode.innerHTML = items.join('');
       }
 
@@ -1365,6 +1561,17 @@ String buildGatewayPage() {
         document.getElementById('ssid').value = data.network?.configuredSsid || '';
         document.getElementById('hostname').value = data.network?.hostname || 'bedjet-gateway';
         document.getElementById('pollIntervalSeconds').value = data.smartthings?.pollIntervalSeconds || 15;
+        document.getElementById('activityLightEnabled').checked = !!data.indicators?.activityLightEnabled;
+        for (const element of lightingForm.elements) {
+          element.disabled = !data.indicators?.activityLightAvailable;
+        }
+        const wifiLocked = !!data.provisioning?.authRequired;
+        for (const element of wifiForm.elements) {
+          element.disabled = wifiLocked;
+        }
+        wifiNotice.textContent = wifiLocked
+          ? 'Wi-Fi changes are locked on the LAN after claim. Use the signed remote Wi-Fi script or preseed Wi-Fi at flash time.'
+          : 'Wi-Fi changes are available before claim or while the gateway is in setup AP mode.';
       }
 
       async function scan() {
@@ -1403,6 +1610,19 @@ String buildGatewayPage() {
         try {
           const result = await api('POST', '/api/v1/local/settings', {
             pollIntervalSeconds: Number(document.getElementById('pollIntervalSeconds').value)
+          });
+          statusNode.textContent = JSON.stringify(result, null, 2);
+          await refresh();
+        } catch (error) {
+          statusNode.textContent = error.message;
+        }
+      });
+
+      lightingForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        try {
+          const result = await api('POST', '/api/v1/local/settings', {
+            activityLightEnabled: document.getElementById('activityLightEnabled').checked
           });
           statusNode.textContent = JSON.stringify(result, null, 2);
           await refresh();
@@ -1488,6 +1708,8 @@ void handleState() {
   addFirmwareInfo(firmware);
   JsonObject smartthings = doc["smartthings"].to<JsonObject>();
   addSmartThingsConfig(smartthings);
+  JsonObject indicators = doc["indicators"].to<JsonObject>();
+  addIndicatorConfig(indicators);
   JsonObject sides = doc["sides"].to<JsonObject>();
   addSlot(sides["left"].to<JsonObject>(), leftState.slot, leftState.status);
   addSlot(sides["right"].to<JsonObject>(), rightState.slot, rightState.status);
@@ -1508,6 +1730,10 @@ void handleLocalStatus() {
   addFirmwareInfo(firmware);
   JsonObject smartthings = doc["smartthings"].to<JsonObject>();
   addSmartThingsConfig(smartthings);
+  JsonObject indicators = doc["indicators"].to<JsonObject>();
+  addIndicatorConfig(indicators);
+  JsonObject provisioning = doc["provisioning"].to<JsonObject>();
+  provisioning["authRequired"] = provisioningRequiresAuth();
   JsonObject sides = doc["sides"].to<JsonObject>();
   addSlot(sides["left"].to<JsonObject>(), leftState.slot, leftState.status);
   addSlot(sides["right"].to<JsonObject>(), rightState.slot, rightState.status);
@@ -1517,29 +1743,46 @@ void handleLocalStatus() {
 void handleLocalSettings() {
   JsonDocument body;
   if (!parseJsonBody(body)) {
-    server.send(400, "application/json", "{\"error\":\"invalid json body\"}");
+    sendJsonBodyError();
     return;
   }
 
+  bool changed = false;
   const JsonVariant requestedPollInterval = body["pollIntervalSeconds"];
-  if (requestedPollInterval.isNull()) {
-    server.send(400, "application/json", "{\"error\":\"pollIntervalSeconds is required\"}");
-    return;
+  if (!requestedPollInterval.isNull()) {
+    const int configuredPollInterval = requestedPollInterval.as<int>();
+    if (configuredPollInterval <= 0) {
+      server.send(400, "application/json", "{\"error\":\"pollIntervalSeconds must be an integer\"}");
+      return;
+    }
+    smartthingsPollIntervalSeconds = clampSmartThingsPollIntervalSeconds(configuredPollInterval);
+    saveSmartThingsConfig();
+    changed = true;
   }
 
-  const int configuredPollInterval = requestedPollInterval.as<int>();
-  if (configuredPollInterval <= 0) {
-    server.send(400, "application/json", "{\"error\":\"pollIntervalSeconds must be an integer\"}");
-    return;
+  const JsonVariant requestedActivityLightEnabled = body["activityLightEnabled"];
+  if (!requestedActivityLightEnabled.isNull()) {
+    activityLightConfig.enabled = requestedActivityLightEnabled.as<bool>();
+    saveActivityLightConfig();
+    if (!activityLightConfig.enabled) {
+      clearActivityLight();
+    } else {
+      signalActivityLight(makeRgbColor(180, 180, 180), 420);
+    }
+    changed = true;
   }
 
-  smartthingsPollIntervalSeconds = clampSmartThingsPollIntervalSeconds(configuredPollInterval);
-  saveSmartThingsConfig();
+  if (!changed) {
+    server.send(400, "application/json", "{\"error\":\"pollIntervalSeconds or activityLightEnabled is required\"}");
+    return;
+  }
 
   JsonDocument response;
   response["ok"] = true;
   JsonObject smartthings = response["smartthings"].to<JsonObject>();
   addSmartThingsConfig(smartthings);
+  JsonObject indicators = response["indicators"].to<JsonObject>();
+  addIndicatorConfig(indicators);
   writeJsonResponse(200, response);
 }
 
@@ -1577,7 +1820,7 @@ void handlePair() {
 
   JsonDocument body;
   if (!parseJsonBody(body)) {
-    server.send(400, "application/json", "{\"error\":\"invalid json\"}");
+    sendJsonBodyError();
     return;
   }
 
@@ -1596,6 +1839,7 @@ void handlePair() {
   state.slot.pairedAt = String(millis());
   state.status.bleReleased = false;
   saveSlot(state.slot);
+  signalActivityLight(makeRgbColor(0, 220, 96), 720);
 
   JsonDocument response;
   response["ok"] = true;
@@ -1646,6 +1890,9 @@ void handleVerify() {
   status["targetTemperatureC"] = state.status.targetTemperatureC;
   status["currentTemperatureC"] = state.status.currentTemperatureC;
   status["bleReleased"] = state.status.bleReleased;
+  if (state.slot.paired) {
+    signalActivityLight(makeRgbColor(0, 220, 96), 520);
+  }
   writeJsonResponse(200, response);
 }
 
@@ -1661,6 +1908,7 @@ void handleForget() {
   state.slot.side = side;
   state.status = SideStatus{};
   saveSlot(state.slot);
+  signalActivityLight(makeRgbColor(255, 132, 0), 520);
 
   JsonDocument response;
   response["ok"] = true;
@@ -1680,6 +1928,7 @@ void handleRelease() {
   if (!useSimulatedBackend() && activeBleAddress == state.slot.deviceId) {
     disconnectActiveBleClient();
   }
+  signalActivityLight(makeRgbColor(255, 132, 0), 520);
 
   JsonDocument response;
   response["ok"] = true;
@@ -1694,6 +1943,7 @@ void handleReleaseAll() {
   if (!useSimulatedBackend()) {
     disconnectActiveBleClient();
   }
+  signalActivityLight(makeRgbColor(255, 132, 0), 520);
 
   JsonDocument response;
   response["ok"] = true;
@@ -1708,6 +1958,7 @@ void handleCommand() {
   }
 
   SideState &state = sideState(side);
+  const SideStatus before = state.status;
   if (!state.slot.paired) {
     server.send(409, "application/json", "{\"error\":\"side not paired\"}");
     return;
@@ -1715,7 +1966,7 @@ void handleCommand() {
 
   JsonDocument body;
   if (!parseJsonBody(body)) {
-    server.send(400, "application/json", "{\"error\":\"invalid json\"}");
+    sendJsonBodyError();
     return;
   }
 
@@ -1758,6 +2009,7 @@ void handleCommand() {
   }
 
   state.status.bleReleased = false;
+  signalActivityLight(colorForCommandActivity(before, state.status, body));
 
   JsonDocument response;
   response["ok"] = true;
@@ -1995,7 +2247,12 @@ void registerRoutes() {
   server.on("/healthz", HTTP_GET, handleHealthz);
   server.on("/api/v1/version", HTTP_GET, handleVersion);
   server.on("/api/v1/provision/status", HTTP_GET, handleProvisionStatus);
-  server.on("/api/v1/provision/wifi", HTTP_POST, handleProvisionSave);
+  server.on("/api/v1/provision/wifi", HTTP_POST, []() {
+    if (provisioningRequiresAuth() && !verifyRequestAuth()) {
+      return;
+    }
+    handleProvisionSave();
+  });
   server.on("/api/v1/claim/status", HTTP_GET, handleClaimStatus);
   server.on("/api/v1/claim", HTTP_POST, handleClaim);
   server.on("/api/v1/local/status", HTTP_GET, handleLocalStatus);
@@ -2082,6 +2339,7 @@ void setup() {
   loadSlot(rightState.slot, "right");
   loadAuthState();
   loadWiFiConfig();
+  loadActivityLightConfig();
   loadSmartThingsConfig();
   loadOtaPersistState();
   otaPersistState.bootCount += 1;
@@ -2096,12 +2354,14 @@ void setup() {
   startMdns();
   registerRoutes();
   server.begin();
+  clearActivityLight();
 
   Serial.printf("HTTP server ready on port %u, mode=%s\n", kHttpPort, networkMode().c_str());
 }
 
 void loop() {
   server.handleClient();
+  tickActivityLight();
   if (restartScheduled && millis() >= restartAtMs) {
     ESP.restart();
   }

@@ -12,14 +12,35 @@ Think of it as a translator stack: SmartThings speaks LAN, BedJet speaks BLE, an
 
 ```mermaid
 flowchart LR
-    ST["SmartThings App"] --> HUB["SmartThings Hub"]
-    HUB --> EDGE["Edge Driver"]
-    EDGE --> BRIDGE["Bridge Service :8787"]
-    BRIDGE --> GATEWAY["ESP32 Gateway :80"]
-    GATEWAY --> LEFT["Left BedJet (BLE)"]
-    GATEWAY --> RIGHT["Right BedJet (BLE)"]
-    ADMIN["Admin / Agent Machine"] -->|SSH| BRIDGE
+    subgraph EXISTING["Already In Your World"]
+        ST["SmartThings App"]
+        HUB["SmartThings Hub"]
+        LEFT["Left BedJet"]
+        RIGHT["Right BedJet"]
+        ADMIN["Admin / Agent Machine"]
+    end
+
+    subgraph ADDED["Added By This Repo"]
+        EDGE["SmartThings Edge Driver"]
+        BRIDGE["Bridge Service<br/>TCP 8787"]
+        GATEWAY["ESP32 Gateway Firmware<br/>TCP 80 + BLE"]
+    end
+
+    ST --> HUB
+    HUB --> EDGE
+    EDGE --> BRIDGE
+    BRIDGE --> GATEWAY
+    GATEWAY -->|BLE| LEFT
+    GATEWAY -->|BLE| RIGHT
+    ADMIN -->|SSH| BRIDGE
     ADMIN -->|HTTP| GATEWAY
+
+    classDef existing fill:#e8f1ff,stroke:#2b6cb0,stroke-width:2px,color:#102a43;
+    classDef added fill:#fff4d6,stroke:#b7791f,stroke-width:2px,color:#3d2f00;
+    classDef admin fill:#e6fffa,stroke:#2c7a7b,stroke-width:2px,color:#123c3d;
+    class ST,HUB,LEFT,RIGHT existing;
+    class EDGE,BRIDGE,GATEWAY added;
+    class ADMIN admin;
 ```
 
 ## What You Need To Start
@@ -27,6 +48,7 @@ flowchart LR
 - A Linux host reachable over SSH (for the bridge).
 - Docker + Compose on that Linux host.
 - ESP32-S3 that can run this firmware.
+- PlatformIO Core (`pio`) on the machine used to flash the ESP32.
 - SmartThings hub + SmartThings CLI access.
 - Control machine (Windows/Linux/macOS) that can reach:
   - bridge host over SSH
@@ -58,6 +80,21 @@ Do not assume SSH tunnels.
 Stop on first failure with the exact command, stderr, and the fix.
 Do not print or commit secrets.
 
+
+## What Changed In This Beta
+
+If you saw an earlier draft, this is the cleaned-up shape:
+
+- The install path is now centered on the real three-piece stack: gateway firmware, bridge service, and SmartThings Edge driver.
+- The unfinished web wizard is no longer part of the supported flow.
+- Bridge and gateway targets are explicit inputs or saved local state, not hidden personal defaults.
+- The bridge now exposes `GET /readyz` and `GET /v1/version` and refuses weak live config at startup.
+- The bridge now rejects oversized JSON requests instead of reading unbounded payloads.
+- Gateway setup now supports a fast flash-time Wi-Fi preseed path for first boot.
+- Gateway Wi-Fi changes after claim now use a signed maintenance flow instead of casual open-ended changes.
+- Gateway web UI now includes a subtle RGB activity light with a user-facing on/off toggle.
+- OTA support now includes version/attestation visibility plus a signed rollback path when the alternate slot is available.
+- Docs are now portable, agent-friendly, and scrubbed of environment-specific paths and secrets.
 
 ## Connectivity Requirements (Must Be True)
 
@@ -123,22 +160,52 @@ sudo ufw status verbose
 
 ### Step 1: Gateway Provisioning (ESP32)
 
-1. Flash firmware from `firmware/`.
-2. Join `BedJetGatewaySetup` temporary Wi-Fi AP.
-3. Open `http://192.168.4.1`.
-4. Save preferred Wi-Fi SSID/password/hostname for gateway LAN operation.
-5. Wait for the gateway to reboot onto your normal LAN.
-6. Verify network allows bridge host + SmartThings hub to reach gateway.
-7. Check `http://bedjet-gateway.local/healthz`.
-8. Open `http://bedjet-gateway.local/`.
-9. Pair left and right BedJet units:
+1. Install PlatformIO Core on the machine that will flash the ESP32.
+
+```bash
+python -m pip install platformio
+```
+
+2. Connect the ESP32-S3 over USB.
+3. Flash the firmware. Choose one path.
+
+Windows helper, with optional Wi-Fi preseed so first boot skips the setup AP:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Flash-BedJetGateway.ps1 `
+  -Port <com-port> `
+  -WifiSsid "<wifi-ssid>" `
+  -WifiPassword "<wifi-password>" `
+  -GatewayHostname bedjet-gateway
+```
+
+Linux/macOS or raw PlatformIO path:
+
+```bash
+cd <repo-root>/firmware
+pio run -e esp32-s3-devkitc-1 -t upload --upload-port <serial-port>
+```
+
+4. If you did not preseed Wi-Fi, join `BedJetGatewaySetup` temporary Wi-Fi AP.
+5. Open `http://192.168.4.1`.
+6. Save preferred Wi-Fi SSID/password/hostname for gateway LAN operation.
+7. Wait for the gateway to reboot onto your normal LAN.
+8. Verify network allows bridge host + SmartThings hub to reach gateway.
+9. Check `http://bedjet-gateway.local/healthz`.
+10. Open `http://bedjet-gateway.local/`.
+11. Pair left and right BedJet units:
    - pair left while right is off
    - pair right while left is off
    - verify both after pairing
 
+There is no true network-remote provisioning path before first boot. To skip the AP on day one, preseed Wi-Fi at flash time.
+Once the gateway is already claimed and reachable on the LAN, you can rotate Wi-Fi settings remotely with `.\scripts\windows\Set-BedJetGatewayWifi.ps1`. That is a post-install maintenance path, not a first-boot shortcut.
+After the gateway is claimed, Wi-Fi changes are treated as a signed maintenance action. That is the security patch in plain English: first boot is easy, later changes are deliberate.
+
 ### Step 2: Bridge Install + Verify
 
 Recommended path: use the Windows setup script at least once. It handles gateway claim, secret generation, deploy, and verification in one run.
+This is also the step that claims the gateway. After claim, Wi-Fi rotation becomes a signed maintenance action instead of an open first-boot setup action.
 
 Windows (scripted):
 
@@ -203,7 +270,19 @@ ssh -o BatchMode=yes <ssh-target> 'printf ok'
 ssh <ssh-target> "curl -fsS http://127.0.0.1:8787/healthz"
 ```
 
-3. Bridge-to-gateway state:
+3. Bridge readiness:
+
+```bash
+ssh <ssh-target> "curl -fsS http://127.0.0.1:8787/readyz"
+```
+
+4. Bridge version:
+
+```bash
+ssh <ssh-target> "curl -fsS http://127.0.0.1:8787/v1/version"
+```
+
+5. Bridge-to-gateway state:
 
 ```bash
 ssh <ssh-target> "curl -fsS http://127.0.0.1:8787/v1/system"
