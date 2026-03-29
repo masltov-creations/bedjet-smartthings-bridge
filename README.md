@@ -5,7 +5,7 @@ Private home-use BedJet control stack with an `ESP32-S3` gateway, a Dockerized U
 ## Current Status
 
 - `Implemented`: script-first remote setup, concise local setup wizard, remote install artifacts, runnable bridge service, ESP32 firmware scaffold, SmartThings Edge scaffold, and setup docs.
-- `Fake run available`: the wizard can simulate the end-to-end setup flow without touching SSH, Docker, firmware, bridge, or SmartThings.
+- `Guide mode`: the setup-app now provides a clean step-by-step install guide instead of browser-driven automation.
 - `Script-first path available`: Windows PowerShell scripts now prove SSH, remote LAN reachability, gateway claim, Docker, remote deploy, and bridge health/status before we depend on the wizard.
 - `LAN-first runtime`: SmartThings is expected to reach the bridge over the home LAN, not over Tailscale.
 - `Gateway claim scaffolded`: bridge-to-gateway claim status, claim, and signed-request hooks now exist in code.
@@ -36,7 +36,7 @@ flowchart LR
   local["This Machine"] --> ssh["SSH / Admin access"]
   ssh --> bridge["Ubuntu VM<br/>bedjet-bridge"]
   local --> hub["SmartThings CLI<br/>Edge package"]
-  hub --> phone["SmartThings App<br/>You + Wendy"]
+  hub --> phone["SmartThings App<br/>Household users"]
   hub --> lan["Home LAN"]
   lan --> bridge
   bridge --> esp["ESP32-S3 Gateway<br/>LAN + HMAC auth"]
@@ -54,7 +54,7 @@ Use the Windows PowerShell script when you want the smallest reliable path first
 powershell -ExecutionPolicy Bypass -File D:\Dev\bedjet-smartthings-bridge\scripts\windows\Setup-BedJetBridge.ps1
 ```
 
-Default target is `<ssh-target>`. The script walks these steps:
+Default target is `user@bridge-host` (change per your environment). The script walks these steps:
 
 1. local prerequisite checks
 2. SSH batch-mode verification

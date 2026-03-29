@@ -1,0 +1,14 @@
+bridge/data/*.sqlite
+bridge/data/*.sqlite-*
+bridge/.env
+bridge/coverage/
+setup-app/data/*.json
+setup-app/data/bedjet-deploy-*/
+setup-app/data/handoffs/*.md
+data/setup-state.json
+firmware/.pio/
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

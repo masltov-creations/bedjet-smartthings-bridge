@@ -1,0 +1,7 @@
+name: "BedJet Bridge"
+packageKey: "bedjet.smartthings.bridge"
+description: "Private LAN Edge driver for the BedJet SmartThings bridge"
+vendorSupportInformation: "Private Install"
+permissions:
+  lan: {}
+  discovery: {}

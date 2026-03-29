@@ -28,7 +28,7 @@ preferences:
     preferenceType: string
     definition:
       stringType: text
-      default: 192.168.1.234
+      default: bedjet-bridge.local
       minLength: 1
       maxLength: 255
   - title: Bridge Port

@@ -142,7 +142,7 @@ export const buildWizardHtml = () => `<!doctype html>
             <li>Flash firmware and boot the ESP32.</li>
             <li>If first setup: join <code>BedJetGatewaySetup</code>, open <code>http://192.168.4.1</code>, save Wi-Fi, reboot.</li>
             <li>Open management page: <code>http://bedjet-gateway.local/manage</code>.</li>
-            <li>Pair both devices: Left = Mas, Right = Wendy.</li>
+            <li>Pair both devices: one for Left, one for Right.</li>
           </ol>
           <div class="verify">
             <strong>Verify</strong>
