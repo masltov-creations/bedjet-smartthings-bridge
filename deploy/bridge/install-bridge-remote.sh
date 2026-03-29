@@ -34,10 +34,10 @@ if ! command -v docker >/dev/null 2>&1; then
   fi
 fi
 
-DOCKER="docker"
+DOCKER=(docker)
 if ! docker info >/dev/null 2>&1; then
   if sudo -n docker info >/dev/null 2>&1; then
-    DOCKER="sudo docker"
+    DOCKER=(sudo docker)
   else
     echo "Docker is installed but not usable by the current user." >&2
     exit 1
@@ -49,18 +49,32 @@ if [[ ! -f deploy/bridge/bridge.env ]]; then
   cp deploy/bridge/bridge.env.example deploy/bridge/bridge.env
 fi
 
-$DOCKER compose -f deploy/bridge/docker-compose.yml up -d --build
+"${DOCKER[@]}" compose -f deploy/bridge/docker-compose.yml up -d --build
 
-for attempt in $(seq 1 12); do
-  if curl -fsS http://127.0.0.1:8787/healthz; then
+for attempt in $(seq 1 18); do
+  container_id="$("${DOCKER[@]}" compose -f deploy/bridge/docker-compose.yml ps -q bedjet-bridge 2>/dev/null || true)"
+  if [[ -n "$container_id" ]]; then
+    health_status="$("${DOCKER[@]}" inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id" 2>/dev/null || true)"
+    if [[ "$health_status" == "healthy" ]]; then
+      echo "Bridge container health is healthy."
+      exit 0
+    fi
+    if [[ "$health_status" == "unhealthy" ]]; then
+      echo "Bridge container reports unhealthy (attempt $attempt/18); retrying..." >&2
+    else
+      echo "Bridge container health is '$health_status' (attempt $attempt/18); retrying..." >&2
+    fi
+  fi
+
+  if curl -fsS http://127.0.0.1:8787/healthz >/dev/null 2>&1; then
+    echo "Bridge HTTP health endpoint is ready."
     exit 0
   fi
 
-  if [[ "$attempt" -lt 12 ]]; then
-    echo "Bridge health check not ready yet (attempt $attempt/12); retrying..." >&2
+  if [[ "$attempt" -lt 18 ]]; then
     sleep 2
   fi
 done
 
-echo "Bridge health check failed after 12 attempts." >&2
+echo "Bridge health check failed after 18 attempts." >&2
 exit 1

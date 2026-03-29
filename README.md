@@ -269,19 +269,25 @@ ssh -o BatchMode=yes <ssh-target> 'printf ok'
 ssh <ssh-target> "curl -fsS http://127.0.0.1:8787/healthz"
 ```
 
-3. Bridge readiness:
+3. Docker container health:
+
+```bash
+ssh <ssh-target> "docker inspect -f '{{.State.Health.Status}}' bedjet-bridge"
+```
+
+4. Bridge readiness:
 
 ```bash
 ssh <ssh-target> "curl -fsS http://127.0.0.1:8787/readyz"
 ```
 
-4. Bridge version:
+5. Bridge version:
 
 ```bash
 ssh <ssh-target> "curl -fsS http://127.0.0.1:8787/v1/version"
 ```
 
-5. Bridge-to-gateway state:
+6. Bridge-to-gateway state:
 
 ```bash
 ssh <ssh-target> "curl -fsS http://127.0.0.1:8787/v1/system"
@@ -350,11 +356,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Setup-BedJetBridge.ps
 
 1. `ssh -o BatchMode=yes <ssh-target> 'printf ok'` succeeds.
 2. `<gateway-url>/healthz` returns healthy response.
-3. Bridge `/healthz` passes on remote host.
-4. Bridge `/v1/system` reports claimed gateway.
-5. Left and right BedJet pairings both verify.
-6. SmartThings on/off control succeeds for both sides with true state feedback.
-7. SmartThings app state matches what the BedJet actually did, not just what we hoped it did.
+3. Docker reports `bedjet-bridge` health as `healthy`.
+4. Bridge `/healthz` passes on remote host.
+5. Bridge `/v1/system` reports claimed gateway.
+6. Left and right BedJet pairings both verify.
+7. SmartThings on/off control succeeds for both sides with true state feedback.
+8. SmartThings app state matches what the BedJet actually did, not just what we hoped it did.
 
 ## Local Validation
 
