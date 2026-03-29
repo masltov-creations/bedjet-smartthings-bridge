@@ -80,7 +80,7 @@ The fastest and easiest install is agent first: With Codex, OpenClaw, Claude, or
 Please install this project for me: https://github.com/bedjet-smartthings-bridge
 ```
 Read the README fully and follow it in order.
-Ask only for missing values: <repo-root>, <ssh-target>, <gateway-url>.
+Ask only for missing values: repo-root, ssh-target, gateway-url.
 Do not assume SSH tunnels.
 Stop on first failure with the exact command, stderr, and the fix.
 Do not print or commit secrets.
