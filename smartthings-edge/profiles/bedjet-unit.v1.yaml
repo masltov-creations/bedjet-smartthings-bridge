@@ -1,0 +1,61 @@
+name: bedjet-unit.v1
+components:
+  - id: main
+    capabilities:
+      - id: switch
+        version: 1
+      - id: thermostatMode
+        version: 1
+      - id: thermostatOperatingState
+        version: 1
+      - id: thermostatCoolingSetpoint
+        version: 1
+      - id: thermostatHeatingSetpoint
+        version: 1
+      - id: switchLevel
+        version: 1
+      - id: temperatureMeasurement
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: Thermostat
+preferences:
+  - title: Bridge Host
+    name: bridgeHost
+    description: Hostname or IP address of the Ubuntu bridge service
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
+      default: 192.168.1.234
+      minLength: 1
+      maxLength: 255
+  - title: Bridge Port
+    name: bridgePort
+    description: HTTP port for the bridge service
+    required: true
+    preferenceType: integer
+    definition:
+      default: 8787
+      minimum: 1
+      maximum: 65535
+  - title: Side
+    name: side
+    description: Logical BedJet side controlled by this device
+    required: true
+    preferenceType: enumeration
+    definition:
+      options:
+        left: Left
+        right: Right
+      default: left
+  - title: Poll Interval Seconds
+    name: pollIntervalSeconds
+    description: Fallback SmartThings refresh interval when gateway override is unavailable
+    required: true
+    preferenceType: integer
+    definition:
+      default: 15
+      minimum: 5
+      maximum: 120

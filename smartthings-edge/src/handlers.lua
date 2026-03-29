@@ -10,6 +10,26 @@ local COOLING_RANGE_C = { minimum = 18, maximum = 32, step = 1 }
 local HEATING_RANGE_C = { minimum = 18, maximum = 38, step = 1 }
 local LEVEL_RANGE = { minimum = 1, maximum = 100, step = 5 }
 local TEMPERATURE_RANGE_C = { minimum = 18, maximum = 38 }
+local DEFAULT_POLL_INTERVAL_SECONDS = 15
+local MIN_POLL_INTERVAL_SECONDS = 5
+local MAX_POLL_INTERVAL_SECONDS = 120
+
+local function clamp(value, minimum, maximum)
+  return math.max(minimum, math.min(maximum, value))
+end
+
+local function poll_interval_seconds(device)
+  local gateway_configured = tonumber(device:get_field(fields.POLL_INTERVAL_SECONDS))
+  if gateway_configured then
+    return clamp(math.floor(gateway_configured), MIN_POLL_INTERVAL_SECONDS, MAX_POLL_INTERVAL_SECONDS)
+  end
+
+  local configured = tonumber(device.preferences.pollIntervalSeconds)
+  if not configured then
+    return DEFAULT_POLL_INTERVAL_SECONDS
+  end
+  return clamp(math.floor(configured), MIN_POLL_INTERVAL_SECONDS, MAX_POLL_INTERVAL_SECONDS)
+end
 
 local function safe_refresh(device)
   local ok, err = pcall(M.refresh, nil, device)
@@ -23,6 +43,27 @@ local function schedule_refresh(device, delay_seconds)
   device.thread:call_with_delay(delay, function()
     safe_refresh(device)
   end)
+end
+
+local function schedule_refresh_burst(device)
+  schedule_refresh(device, 1)
+  schedule_refresh(device, 3)
+end
+
+local function start_polling(device)
+  local token = (tonumber(device:get_field(fields.POLL_TOKEN)) or 0) + 1
+  device:set_field(fields.POLL_TOKEN, token)
+  local interval = poll_interval_seconds(device)
+
+  local function tick()
+    if tonumber(device:get_field(fields.POLL_TOKEN)) ~= token then
+      return
+    end
+    safe_refresh(device)
+    device.thread:call_with_delay(interval, tick)
+  end
+
+  device.thread:call_with_delay(interval, tick)
 end
 
 local function is_heat_mode(mode)
@@ -140,17 +181,33 @@ end
 function M.device_init(_, device)
   device:set_field(fields.SIDE, detect_side(device), { persist = true })
   device:set_field(fields.KIND, detect_kind(device), { persist = true })
+  start_polling(device)
   schedule_refresh(device, 1)
 end
 
 function M.info_changed(_, device)
   device:set_field(fields.SIDE, detect_side(device), { persist = true })
+  start_polling(device)
 end
 
 function M.refresh(_, device)
   local side = device:get_field(fields.SIDE) or detect_side(device)
   local kind = device:get_field(fields.KIND) or detect_kind(device)
-  local snapshot = api.fetch_side(device, side)
+  local ok, snapshot_or_err = pcall(api.fetch_side, device, side)
+  if not ok then
+    log.warn(string.format("refresh failed for %s: %s", side, tostring(snapshot_or_err)))
+    return
+  end
+  local snapshot = snapshot_or_err
+  local configured_poll = snapshot and snapshot.gatewayConfig and tonumber(snapshot.gatewayConfig.pollIntervalSeconds) or nil
+  if configured_poll then
+    configured_poll = clamp(math.floor(configured_poll), MIN_POLL_INTERVAL_SECONDS, MAX_POLL_INTERVAL_SECONDS)
+    local prior_poll = tonumber(device:get_field(fields.POLL_INTERVAL_SECONDS))
+    if prior_poll ~= configured_poll then
+      device:set_field(fields.POLL_INTERVAL_SECONDS, configured_poll)
+      start_polling(device)
+    end
+  end
 
   if kind == "unit" then
     apply_unit_snapshot(device, snapshot)
@@ -169,19 +226,19 @@ function M.switch_on(_, device)
   local kind = device:get_field(fields.KIND) or detect_kind(device)
 
   if kind == "profile" then
-    api.start_profile(device, side)
-    emit_switch(device, true)
-    schedule_refresh(device, 1)
+    local ok, err = pcall(api.start_profile, device, side)
+    if not ok then
+      log.warn(string.format("switch_on profile failed for %s: %s", side, tostring(err)))
+    end
+    schedule_refresh_burst(device)
     return
   end
 
-  local ok, response = pcall(api.send_power, device, side, "on")
-  if ok and response and response.status then
-    apply_unit_snapshot(device, { gateway = response })
-  elseif not ok then
-    log.warn(string.format("switch_on failed for %s: %s", side, tostring(response)))
+  local ok, err = pcall(api.send_power, device, side, "on")
+  if not ok then
+    log.warn(string.format("switch_on failed for %s: %s", side, tostring(err)))
   end
-  schedule_refresh(device, 1)
+  schedule_refresh_burst(device)
 end
 
 function M.switch_off(_, device)
@@ -189,19 +246,19 @@ function M.switch_off(_, device)
   local kind = device:get_field(fields.KIND) or detect_kind(device)
 
   if kind == "profile" then
-    api.stop_profile(device, side)
-    emit_switch(device, false)
-    schedule_refresh(device, 1)
+    local ok, err = pcall(api.stop_profile, device, side)
+    if not ok then
+      log.warn(string.format("switch_off profile failed for %s: %s", side, tostring(err)))
+    end
+    schedule_refresh_burst(device)
     return
   end
 
-  local ok, response = pcall(api.send_power, device, side, "off")
-  if ok and response and response.status then
-    apply_unit_snapshot(device, { gateway = response })
-  elseif not ok then
-    log.warn(string.format("switch_off failed for %s: %s", side, tostring(response)))
+  local ok, err = pcall(api.send_power, device, side, "off")
+  if not ok then
+    log.warn(string.format("switch_off failed for %s: %s", side, tostring(err)))
   end
-  schedule_refresh(device, 1)
+  schedule_refresh_burst(device)
 end
 
 function M.set_level(_, device, command)
@@ -212,13 +269,11 @@ function M.set_level(_, device, command)
 
   local side = device:get_field(fields.SIDE) or detect_side(device)
   local fan_step = as_fan_step(command.args.level)
-  local ok, response = pcall(api.send_fan_step, device, side, fan_step)
-  if ok and response and response.status then
-    apply_unit_snapshot(device, { gateway = response })
-  elseif not ok then
-    log.warn(string.format("set_level failed for %s: %s", side, tostring(response)))
+  local ok, err = pcall(api.send_fan_step, device, side, fan_step)
+  if not ok then
+    log.warn(string.format("set_level failed for %s: %s", side, tostring(err)))
   end
-  schedule_refresh(device, 1)
+  schedule_refresh_burst(device)
 end
 
 function M.set_cooling_setpoint(_, device, command)
@@ -229,13 +284,11 @@ function M.set_cooling_setpoint(_, device, command)
 
   local side = device:get_field(fields.SIDE) or detect_side(device)
   local target_temperature = tonumber(command.args.setpoint) or tonumber(command.args.temperature) or 24
-  local ok, response = pcall(api.send_target_temperature, device, side, "cool", target_temperature)
-  if ok and response and response.status then
-    apply_unit_snapshot(device, { gateway = response })
-  elseif not ok then
-    log.warn(string.format("set_cooling_setpoint failed for %s: %s", side, tostring(response)))
+  local ok, err = pcall(api.send_target_temperature, device, side, "cool", target_temperature)
+  if not ok then
+    log.warn(string.format("set_cooling_setpoint failed for %s: %s", side, tostring(err)))
   end
-  schedule_refresh(device, 1)
+  schedule_refresh_burst(device)
 end
 
 function M.set_heating_setpoint(_, device, command)
@@ -246,13 +299,11 @@ function M.set_heating_setpoint(_, device, command)
 
   local side = device:get_field(fields.SIDE) or detect_side(device)
   local target_temperature = tonumber(command.args.setpoint) or tonumber(command.args.temperature) or 24
-  local ok, response = pcall(api.send_target_temperature, device, side, "heat", target_temperature)
-  if ok and response and response.status then
-    apply_unit_snapshot(device, { gateway = response })
-  elseif not ok then
-    log.warn(string.format("set_heating_setpoint failed for %s: %s", side, tostring(response)))
+  local ok, err = pcall(api.send_target_temperature, device, side, "heat", target_temperature)
+  if not ok then
+    log.warn(string.format("set_heating_setpoint failed for %s: %s", side, tostring(err)))
   end
-  schedule_refresh(device, 1)
+  schedule_refresh_burst(device)
 end
 
 function M.mode_off(_, device)
@@ -266,13 +317,11 @@ function M.mode_cool(_, device)
   end
 
   local side = device:get_field(fields.SIDE) or detect_side(device)
-  local ok, response = pcall(api.send_mode, device, side, "cool")
-  if ok and response and response.status then
-    apply_unit_snapshot(device, { gateway = response })
-  elseif not ok then
-    log.warn(string.format("mode_cool failed for %s: %s", side, tostring(response)))
+  local ok, err = pcall(api.send_mode, device, side, "cool")
+  if not ok then
+    log.warn(string.format("mode_cool failed for %s: %s", side, tostring(err)))
   end
-  schedule_refresh(device, 1)
+  schedule_refresh_burst(device)
 end
 
 function M.mode_heat(_, device)
@@ -282,13 +331,11 @@ function M.mode_heat(_, device)
   end
 
   local side = device:get_field(fields.SIDE) or detect_side(device)
-  local ok, response = pcall(api.send_mode, device, side, "heat")
-  if ok and response and response.status then
-    apply_unit_snapshot(device, { gateway = response })
-  elseif not ok then
-    log.warn(string.format("mode_heat failed for %s: %s", side, tostring(response)))
+  local ok, err = pcall(api.send_mode, device, side, "heat")
+  if not ok then
+    log.warn(string.format("mode_heat failed for %s: %s", side, tostring(err)))
   end
-  schedule_refresh(device, 1)
+  schedule_refresh_burst(device)
 end
 
 function M.set_thermostat_mode(_, device, command)
@@ -305,6 +352,8 @@ function M.set_thermostat_mode(_, device, command)
 end
 
 function M.device_removed(_, device)
+  local token = (tonumber(device:get_field(fields.POLL_TOKEN)) or 0) + 1
+  device:set_field(fields.POLL_TOKEN, token)
   log.info("BedJet device removed", { device = device.device_network_id })
 end
 

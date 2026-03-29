@@ -38,6 +38,9 @@ constexpr const char *kBedJetCommandUuid = "00002004-bed0-0080-aa55-4265644a6574
 constexpr const char *kBedJetNameUuid = "00002001-bed0-0080-aa55-4265644a6574";
 constexpr const char *kFirmwareBuildId = __DATE__ " " __TIME__;
 constexpr uint32_t kFirmwareApiVersion = 3;
+constexpr int kDefaultSmartThingsPollIntervalSeconds = 15;
+constexpr int kMinSmartThingsPollIntervalSeconds = 5;
+constexpr int kMaxSmartThingsPollIntervalSeconds = 120;
 
 enum BedjetButton : uint8_t {
   BTN_OFF = 0x1,
@@ -115,6 +118,7 @@ SideState leftState;
 SideState rightState;
 AuthState authState;
 WiFiConfigState wifiConfig;
+int smartthingsPollIntervalSeconds = kDefaultSmartThingsPollIntervalSeconds;
 bool mdnsStarted = false;
 bool restartScheduled = false;
 unsigned long restartAtMs = 0;
@@ -154,6 +158,16 @@ unsigned long lastStatusNotificationAtMs = 0;
 
 bool useSimulatedBackend() {
   return BEDJET_SIMULATED_BACKEND == 1;
+}
+
+int clampSmartThingsPollIntervalSeconds(int value) {
+  if (value < kMinSmartThingsPollIntervalSeconds) {
+    return kMinSmartThingsPollIntervalSeconds;
+  }
+  if (value > kMaxSmartThingsPollIntervalSeconds) {
+    return kMaxSmartThingsPollIntervalSeconds;
+  }
+  return value;
 }
 
 String simulatedDeviceIdForSide(const String &side) {
@@ -211,6 +225,15 @@ void saveWiFiConfig() {
   preferences.putString("wifi.ssid", wifiConfig.ssid);
   preferences.putString("wifi.password", wifiConfig.password);
   preferences.putString("wifi.hostname", wifiConfig.hostname);
+}
+
+void loadSmartThingsConfig() {
+  const int configured = preferences.getInt("st.pollSec", kDefaultSmartThingsPollIntervalSeconds);
+  smartthingsPollIntervalSeconds = clampSmartThingsPollIntervalSeconds(configured);
+}
+
+void saveSmartThingsConfig() {
+  preferences.putInt("st.pollSec", smartthingsPollIntervalSeconds);
 }
 
 void loadOtaPersistState() {
@@ -846,6 +869,10 @@ void addFirmwareInfo(JsonObject object) {
   ota["lastAttemptAt"] = otaPersistState.lastAttemptAt;
 }
 
+void addSmartThingsConfig(JsonObject object) {
+  object["pollIntervalSeconds"] = smartthingsPollIntervalSeconds;
+}
+
 bool isClaimRoute() {
   return server.uri() == "/api/v1/claim/status" || server.uri() == "/api/v1/claim";
 }
@@ -1170,6 +1197,14 @@ String buildGatewayPage() {
             <input id="hostname" name="hostname" />
             <button type="submit">Save and reboot</button>
           </form>
+          <hr style="margin: 16px 0; border: 0; border-top: 1px solid var(--border);" />
+          <h3>SmartThings Sync</h3>
+          <p>Control how often SmartThings re-reads real BedJet state.</p>
+          <form id="smartthingsForm">
+            <label for="pollIntervalSeconds">Poll interval seconds</label>
+            <input id="pollIntervalSeconds" name="pollIntervalSeconds" type="number" min="5" max="120" value="15" required />
+            <button class="secondary" type="submit">Save SmartThings Settings</button>
+          </form>
         </section>
       </div>
 
@@ -1237,6 +1272,7 @@ String buildGatewayPage() {
       const scanBtn = document.getElementById('scanBtn');
       const releaseAllBtn = document.getElementById('releaseAllBtn');
       const wifiForm = document.getElementById('wifiForm');
+      const smartthingsForm = document.getElementById('smartthingsForm');
       let lastScan = [];
 
       function escapeHtml(value) {
@@ -1251,10 +1287,16 @@ String buildGatewayPage() {
       function renderSummary(data) {
         const items = [];
         const networkGood = data.network?.stationConnected;
+        const firmware = data.firmware || {};
+        const apiVersion = firmware.apiVersion || 'n/a';
+        const buildId = firmware.buildId || 'n/a';
+        const pollIntervalSeconds = data.smartthings?.pollIntervalSeconds || 15;
         items.push(`<span class="pill"><span class="dot ${networkGood ? 'good' : ''}"></span>${networkGood ? 'On Wi-Fi' : 'Setup AP'}</span>`);
         items.push(`<span class="pill">Hostname: <span class="mono">${escapeHtml(data.network?.hostname || 'bedjet-gateway')}</span></span>`);
         items.push(`<span class="pill">Claimed: <strong>${data.claim?.claimed ? 'Yes' : 'No'}</strong></span>`);
         items.push(`<span class="pill">Backend: <strong>${data.simulatedBackend ? 'Simulated' : 'BLE'}</strong></span>`);
+        items.push(`<span class="pill">Version: <span class="mono">v${escapeHtml(apiVersion)}</span> · Build: <span class="mono">${escapeHtml(buildId)}</span></span>`);
+        items.push(`<span class="pill">SmartThings Poll: <span class="mono">${escapeHtml(pollIntervalSeconds)}s</span></span>`);
         summaryNode.innerHTML = items.join('');
       }
 
@@ -1322,6 +1364,7 @@ String buildGatewayPage() {
         renderPairings(data);
         document.getElementById('ssid').value = data.network?.configuredSsid || '';
         document.getElementById('hostname').value = data.network?.hostname || 'bedjet-gateway';
+        document.getElementById('pollIntervalSeconds').value = data.smartthings?.pollIntervalSeconds || 15;
       }
 
       async function scan() {
@@ -1350,6 +1393,19 @@ String buildGatewayPage() {
             hostname: document.getElementById('hostname').value
           });
           statusNode.textContent = JSON.stringify(result, null, 2);
+        } catch (error) {
+          statusNode.textContent = error.message;
+        }
+      });
+
+      smartthingsForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        try {
+          const result = await api('POST', '/api/v1/local/settings', {
+            pollIntervalSeconds: Number(document.getElementById('pollIntervalSeconds').value)
+          });
+          statusNode.textContent = JSON.stringify(result, null, 2);
+          await refresh();
         } catch (error) {
           statusNode.textContent = error.message;
         }
@@ -1430,6 +1486,8 @@ void handleState() {
   addNetworkState(network);
   JsonObject firmware = doc["firmware"].to<JsonObject>();
   addFirmwareInfo(firmware);
+  JsonObject smartthings = doc["smartthings"].to<JsonObject>();
+  addSmartThingsConfig(smartthings);
   JsonObject sides = doc["sides"].to<JsonObject>();
   addSlot(sides["left"].to<JsonObject>(), leftState.slot, leftState.status);
   addSlot(sides["right"].to<JsonObject>(), rightState.slot, rightState.status);
@@ -1448,10 +1506,41 @@ void handleLocalStatus() {
   addNetworkState(network);
   JsonObject firmware = doc["firmware"].to<JsonObject>();
   addFirmwareInfo(firmware);
+  JsonObject smartthings = doc["smartthings"].to<JsonObject>();
+  addSmartThingsConfig(smartthings);
   JsonObject sides = doc["sides"].to<JsonObject>();
   addSlot(sides["left"].to<JsonObject>(), leftState.slot, leftState.status);
   addSlot(sides["right"].to<JsonObject>(), rightState.slot, rightState.status);
   writeJsonResponse(200, doc);
+}
+
+void handleLocalSettings() {
+  JsonDocument body;
+  if (!parseJsonBody(body)) {
+    server.send(400, "application/json", "{\"error\":\"invalid json body\"}");
+    return;
+  }
+
+  const JsonVariant requestedPollInterval = body["pollIntervalSeconds"];
+  if (requestedPollInterval.isNull()) {
+    server.send(400, "application/json", "{\"error\":\"pollIntervalSeconds is required\"}");
+    return;
+  }
+
+  const int configuredPollInterval = requestedPollInterval.as<int>();
+  if (configuredPollInterval <= 0) {
+    server.send(400, "application/json", "{\"error\":\"pollIntervalSeconds must be an integer\"}");
+    return;
+  }
+
+  smartthingsPollIntervalSeconds = clampSmartThingsPollIntervalSeconds(configuredPollInterval);
+  saveSmartThingsConfig();
+
+  JsonDocument response;
+  response["ok"] = true;
+  JsonObject smartthings = response["smartthings"].to<JsonObject>();
+  addSmartThingsConfig(smartthings);
+  writeJsonResponse(200, response);
 }
 
 void handleScan() {
@@ -1912,6 +2001,7 @@ void registerRoutes() {
   server.on("/api/v1/claim", HTTP_POST, handleClaim);
   server.on("/api/v1/local/status", HTTP_GET, handleLocalStatus);
   server.on("/api/v1/local/scan", HTTP_GET, handleScan);
+  server.on("/api/v1/local/settings", HTTP_POST, handleLocalSettings);
   server.on("/api/v1/local/release-all", HTTP_POST, handleReleaseAll);
   server.on("/api/v1/state", HTTP_GET, []() {
     if (!verifyRequestAuth()) {
@@ -1993,6 +2083,7 @@ void setup() {
   loadSlot(rightState.slot, "right");
   loadAuthState();
   loadWiFiConfig();
+  loadSmartThingsConfig();
   loadOtaPersistState();
   otaPersistState.bootCount += 1;
   if (otaPersistState.lastStatus == "applied-pending-reboot") {

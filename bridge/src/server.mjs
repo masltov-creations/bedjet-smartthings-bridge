@@ -384,6 +384,7 @@ export const createBridgeServer = (options = {}) => {
           side,
           pairing: store.getPairing(side),
           gateway: gatewayState.sides?.[side] ?? null,
+          gatewayConfig: gatewayState.smartthings ?? null,
           run: store.getRun(side)
         });
         return;
