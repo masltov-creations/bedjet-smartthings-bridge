@@ -262,7 +262,11 @@ if ($beforeVersion -and $beforeVersion.firmware -and $beforeVersion.firmware.bui
     if ($beforeSketchMd5) {
         Write-Ok "Current firmware sketch MD5: $beforeSketchMd5"
     }
-    Write-Ok ("Rollback available before update: {0}" -f ($beforeCanRollback ? 'Yes' : 'No'))
+    $beforeRollbackText = 'No'
+    if ($beforeCanRollback) {
+        $beforeRollbackText = 'Yes'
+    }
+    Write-Ok ("Rollback available before update: {0}" -f $beforeRollbackText)
 } else {
     Write-Host '[wait] Version endpoint unavailable on current firmware; post-update attestation will rely on health + OTA status fields when available.' -ForegroundColor Yellow
 }
@@ -385,4 +389,8 @@ if (-not $afterSketchMd5) {
     throw 'Gateway firmware sketch MD5 is missing; attestation incomplete.'
 }
 Write-Ok 'Gateway OTA attestation passed (status + SHA256).'
-Write-Ok ("Rollback available after update: {0}" -f ($afterCanRollback ? 'Yes' : 'No'))
+$afterRollbackText = 'No'
+if ($afterCanRollback) {
+    $afterRollbackText = 'Yes'
+}
+Write-Ok ("Rollback available after update: {0}" -f $afterRollbackText)
