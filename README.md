@@ -48,18 +48,16 @@ Do not shuffle that order unless you enjoy debugging Bluetooth and networking at
 ## Agent Instructions (Primary Install Path)
 
 Use this first with Codex, OpenClaw, Claude, or similar.
-
-```text
 Codex / OpenClaw / Claude:
-Please install this project for me:
-https://github.com/<owner>/<repo>
-
+```text
+Please install this project for me: https://github.com/bedjet-smartthings-bridge
+```
 Read the README fully and follow it in order.
 Ask only for missing values: <repo-root>, <ssh-target>, <gateway-url>.
 Do not assume SSH tunnels.
 Stop on first failure with the exact command, stderr, and the fix.
 Do not print or commit secrets.
-```
+
 
 ## Connectivity Requirements (Must Be True)
 
