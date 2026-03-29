@@ -47,7 +47,7 @@ flowchart LR
 
 - A Linux host reachable over SSH (for the bridge).
 - Docker + Compose on that Linux host.
-- ESP32-S3 that can run this firmware.
+- An ESP32-S3 module that can run this firmware.
 - PlatformIO Core (`pio`) on the machine used to flash the ESP32.
 - SmartThings hub + SmartThings CLI access.
 - Control machine (Windows/Linux/macOS) that can reach:
