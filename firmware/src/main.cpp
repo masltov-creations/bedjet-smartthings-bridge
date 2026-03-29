@@ -149,6 +149,8 @@ BLERemoteService *activeBleService = nullptr;
 BLERemoteCharacteristic *activeCmdChar = nullptr;
 BLERemoteCharacteristic *activeStatusChar = nullptr;
 BLERemoteCharacteristic *activeNameChar = nullptr;
+std::string lastStatusNotification;
+unsigned long lastStatusNotificationAtMs = 0;
 
 bool useSimulatedBackend() {
   return BEDJET_SIMULATED_BACKEND == 1;
@@ -296,6 +298,16 @@ bool isLikelyBedJetAdvertised(BLEAdvertisedDevice &device) {
   return name.indexOf("BEDJET") >= 0;
 }
 
+void handleStatusNotify(BLERemoteCharacteristic *characteristic, uint8_t *data, size_t length, bool isNotify) {
+  (void)characteristic;
+  (void)isNotify;
+  if (data == nullptr || length == 0) {
+    return;
+  }
+  lastStatusNotification.assign(reinterpret_cast<const char *>(data), length);
+  lastStatusNotificationAtMs = millis();
+}
+
 void disconnectActiveBleClient() {
   if (activeBleClient != nullptr && activeBleClient->isConnected()) {
     activeBleClient->disconnect();
@@ -305,6 +317,8 @@ void disconnectActiveBleClient() {
   activeCmdChar = nullptr;
   activeStatusChar = nullptr;
   activeNameChar = nullptr;
+  lastStatusNotification.clear();
+  lastStatusNotificationAtMs = 0;
 }
 
 bool ensureBleClientConnected(const String &deviceId, String &error) {
@@ -345,6 +359,10 @@ bool ensureBleClientConnected(const String &deviceId, String &error) {
     error = "BedJet command characteristic not found";
     disconnectActiveBleClient();
     return false;
+  }
+
+  if (activeStatusChar != nullptr && activeStatusChar->canNotify()) {
+    activeStatusChar->registerForNotify(handleStatusNotify, true);
   }
 
   activeBleAddress = deviceId;
@@ -548,6 +566,14 @@ bool readBedJetStatus(const String &deviceId, ParsedBedJetStatus &parsed, String
   if (!ensureBleClientConnected(deviceId, error)) {
     return false;
   }
+
+  if (!lastStatusNotification.empty() && (millis() - lastStatusNotificationAtMs) < 4000) {
+    String notifyError;
+    if (parseBedJetStatusPacket(lastStatusNotification, parsed, notifyError)) {
+      return true;
+    }
+  }
+
   if (activeStatusChar == nullptr || !activeStatusChar->canRead()) {
     error = "BedJet status characteristic unavailable";
     return false;
@@ -558,7 +584,7 @@ bool readBedJetStatus(const String &deviceId, ParsedBedJetStatus &parsed, String
 
 bool commandFieldsMatch(const JsonDocument &body, const SideStatus &desired, const ParsedBedJetStatus &observed) {
   if (observed.ackOnly) {
-    return true;
+    return false;
   }
   if (body["power"].is<const char *>()) {
     if (observed.power != desired.power) {
@@ -586,24 +612,24 @@ bool commandFieldsMatch(const JsonDocument &body, const SideStatus &desired, con
 bool confirmCommandApplied(SideState &state, const JsonDocument &body, const SideStatus &desired, String &error) {
   const unsigned long deadline = millis() + 2200;
   String lastError;
+  bool ackSeen = false;
 
   while (millis() < deadline) {
     ParsedBedJetStatus observed;
     String readError;
     if (readBedJetStatus(state.slot.deviceId, observed, readError) && observed.valid) {
+      if (observed.ackOnly) {
+        ackSeen = true;
+        lastError = "command acknowledged; awaiting state confirmation";
+        delay(160);
+        continue;
+      }
       if (commandFieldsMatch(body, desired, observed)) {
-        if (observed.ackOnly) {
-          state.status.power = desired.power;
-          state.status.mode = desired.mode;
-          state.status.fanStep = desired.fanStep;
-          state.status.targetTemperatureC = desired.targetTemperatureC;
-        } else {
-          state.status.power = observed.power;
-          state.status.mode = observed.mode;
-          state.status.fanStep = observed.fanStep;
-          state.status.targetTemperatureC = observed.targetTemperatureC;
-          state.status.currentTemperatureC = observed.currentTemperatureC;
-        }
+        state.status.power = observed.power;
+        state.status.mode = observed.mode;
+        state.status.fanStep = observed.fanStep;
+        state.status.targetTemperatureC = observed.targetTemperatureC;
+        state.status.currentTemperatureC = observed.currentTemperatureC;
         state.status.bleReleased = false;
         return true;
       }
@@ -615,7 +641,9 @@ bool confirmCommandApplied(SideState &state, const JsonDocument &body, const Sid
   }
 
   if (lastError.length() == 0) {
-    lastError = "command timed out waiting for BedJet ACK";
+    lastError = "command timed out waiting for BedJet state confirmation";
+  } else if (ackSeen) {
+    lastError = "command acknowledged but state confirmation timed out";
   }
   error = lastError;
   return false;
@@ -660,7 +688,10 @@ bool applyModeOrPower(SideState &state, const JsonDocument &body, String &error)
         return false;
       }
     } else if (power.equalsIgnoreCase("on") && !body["mode"].is<const char *>()) {
-      const String currentMode = state.status.mode.length() > 0 ? state.status.mode : String("cool");
+      String currentMode = state.status.mode.length() > 0 ? state.status.mode : String("cool");
+      if (currentMode.equalsIgnoreCase("off")) {
+        currentMode = "cool";
+      }
       sent = sendBedJetButton(deviceId, buttonForMode(currentMode), error);
       if (!sent) {
         return false;
