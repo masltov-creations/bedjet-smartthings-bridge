@@ -2,6 +2,7 @@ local capabilities = require "st.capabilities"
 local log = require "log"
 local api = require "bridge_api"
 local fields = require "fields"
+local device_catalog = require "device_catalog"
 
 local M = {}
 local SUPPORTED_THERMOSTAT_MODES = { "off", "cool", "heat" }
@@ -13,6 +14,13 @@ local TEMPERATURE_RANGE_C = { minimum = 18, maximum = 38 }
 local DEFAULT_POLL_INTERVAL_SECONDS = 15
 local MIN_POLL_INTERVAL_SECONDS = 5
 local MAX_POLL_INTERVAL_SECONDS = 120
+
+local function ensure_catalog_devices(driver)
+  local ok, err = pcall(device_catalog.ensure_devices, driver)
+  if not ok then
+    log.warn(string.format("device catalog ensure failed: %s", tostring(err)))
+  end
+end
 
 local function clamp(value, minimum, maximum)
   return math.max(minimum, math.min(maximum, value))
@@ -192,7 +200,8 @@ function M.device_added(_, device)
   end
 end
 
-function M.device_init(_, device)
+function M.device_init(driver, device)
+  ensure_catalog_devices(driver)
   local side = detect_side(device)
   local kind = detect_kind(device)
   device:set_field(fields.SIDE, side, { persist = true })
