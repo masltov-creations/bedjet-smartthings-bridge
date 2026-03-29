@@ -16,15 +16,6 @@ What it does:
 - Keeps SmartThings state tied to actual BedJet readback instead of wishful thinking.
 - Gives you a local gateway UI for pairing, checks, Wi-Fi maintenance, indicator control, and OTA updates.
 
-## Highlights
-
-- Local-first: the running system stays on your network. No cloud relay and no SSH tunnel acrobatics required for normal operation.
-- Security-minded: explicit gateway claim, signed maintenance actions, OTA attestation, rollback support, and no baked-in personal endpoints.
-- Easy to install: agent-first instructions, Windows helper scripts, and a full manual fallback when you want to see every moving part.
-- Honest state: SmartThings commands are designed around confirmed BedJet readback, not optimistic UI theater.
-- Maintainable: pairing, Wi-Fi maintenance, activity light control, health checks, version checks, and OTA updates are all built into the stack.
-- Portable control: you can run the install flow from Windows, Linux, or macOS as long as you can reach SSH and the local gateway.
-
 ```mermaid
 flowchart LR
     subgraph EXISTING["Already In Your World"]
@@ -57,6 +48,15 @@ flowchart LR
     class EDGE,BRIDGE,GATEWAY added;
     class ADMIN admin;
 ```
+
+## Highlights
+
+- Security-minded: gateway claim, signed maintenance actions, OTA attestation, and rollback support are built into the design.
+- OTA-ready: the gateway can be updated in place and verified after reboot, so you do not need to reflash over USB for every firmware change.
+- Modular: the gateway, bridge, and SmartThings driver are separate pieces, so each layer can be updated or debugged without rewriting the whole stack.
+- Easy to operate: install helpers cover the common path, and the manual path is still documented end to end when you want full control.
+- Local-first: the running system stays on your network for normal operation. No cloud relay and no SSH tunnel gymnastics required.
+- Observable: health, readiness, version, pairing, and gateway status are exposed so support and debugging are based on real signals.
 
 ## What You Need To Start
 
