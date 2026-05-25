@@ -49,6 +49,29 @@ if [[ ! -f deploy/bridge/bridge.env ]]; then
   cp deploy/bridge/bridge.env.example deploy/bridge/bridge.env
 fi
 
+# bridge.env may be generated on Windows; strip CR so sourced values are valid in bash/compose.
+sed -i 's/\r$//' deploy/bridge/bridge.env
+if [[ -f deploy/bridge/.env ]]; then
+  sed -i 's/\r$//' deploy/bridge/.env
+fi
+
+set -a
+# Export bridge env so docker compose variable interpolation can use BRIDGE_BIND_ADDRESS/BRIDGE_PORT.
+source deploy/bridge/bridge.env
+# Allow deploy/bridge/.env to override compose interpolation defaults without changing app runtime env.
+if [[ -f deploy/bridge/.env ]]; then
+  source deploy/bridge/.env
+fi
+BRIDGE_BIND_ADDRESS="${BRIDGE_BIND_ADDRESS:-0.0.0.0}"
+BRIDGE_PORT="${BRIDGE_PORT:-8787}"
+set +a
+export BRIDGE_BIND_ADDRESS BRIDGE_PORT
+
+bridge_health_host="$BRIDGE_BIND_ADDRESS"
+if [[ -z "$bridge_health_host" || "$bridge_health_host" == "0.0.0.0" || "$bridge_health_host" == "::" ]]; then
+  bridge_health_host="127.0.0.1"
+fi
+
 "${DOCKER[@]}" compose -f deploy/bridge/docker-compose.yml up -d --build
 
 for attempt in $(seq 1 18); do
@@ -66,7 +89,7 @@ for attempt in $(seq 1 18); do
     fi
   fi
 
-  if curl -fsS http://127.0.0.1:8787/healthz >/dev/null 2>&1; then
+  if curl -fsS "http://${bridge_health_host}:${BRIDGE_PORT}/healthz" >/dev/null 2>&1; then
     echo "Bridge HTTP health endpoint is ready."
     exit 0
   fi

@@ -6,7 +6,10 @@ const SIMULATED_DEVICES = [
 ];
 
 const defaultSideState = () => ({
-  paired: null,
+  paired: false,
+  deviceId: "",
+  displayName: "",
+  pairedAt: "",
   status: {
     power: "off",
     mode: "cool",
@@ -18,6 +21,19 @@ const defaultSideState = () => ({
 });
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const buildPairing = (sideState, side) => {
+  if (!sideState?.paired || !sideState.deviceId) {
+    return null;
+  }
+
+  return {
+    side,
+    deviceId: sideState.deviceId,
+    displayName: sideState.displayName,
+    pairedAt: sideState.pairedAt || null
+  };
+};
 
 class FirmwareRequestError extends Error {
   constructor(message, status) {
@@ -67,15 +83,13 @@ class SimulatedFirmwareTransport {
 
   async pair(side, candidate) {
     await sleep(100);
-    this.state.sides[side].paired = {
-      side,
-      deviceId: candidate.deviceId,
-      displayName: candidate.displayName,
-      pairedAt: new Date().toISOString()
-    };
+    this.state.sides[side].paired = true;
+    this.state.sides[side].deviceId = candidate.deviceId;
+    this.state.sides[side].displayName = candidate.displayName;
+    this.state.sides[side].pairedAt = new Date().toISOString();
     this.state.sides[side].status.bleReleased = false;
     this.logger.info("Simulated pairing completed", { side, candidate });
-    return { ok: true, pairing: structuredClone(this.state.sides[side].paired) };
+    return { ok: true, pairing: buildPairing(this.state.sides[side], side) };
   }
 
   async verify(side) {
@@ -83,7 +97,7 @@ class SimulatedFirmwareTransport {
     return {
       ok: Boolean(this.state.sides[side].paired),
       side,
-      pairing: structuredClone(this.state.sides[side].paired),
+      pairing: buildPairing(this.state.sides[side], side),
       status: structuredClone(this.state.sides[side].status)
     };
   }
@@ -122,13 +136,19 @@ class SimulatedFirmwareTransport {
       ok: true,
       confirmed: true,
       side,
-      pairing: structuredClone(sideState.paired),
+      pairing: buildPairing(sideState, side),
       status: structuredClone(sideState.status)
     };
   }
 }
 
 class HttpFirmwareTransport {
+  // The ESP32 gateway handles one TCP request at a time.  Serializing here
+  // prevents concurrent bridge requests (e.g. left-side command + right-side
+  // poll) from racing each other, which causes timeout-driven retries and
+  // cascading multi-second delays.
+  #requestQueue = Promise.resolve();
+
   constructor(baseUrl, { gatewayId, sharedSecret, timeoutMs, retries }) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
     this.gatewayId = gatewayId;
@@ -158,7 +178,7 @@ class HttpFirmwareTransport {
   }
 
   async verify(side, options = {}) {
-    return this.#request("POST", `/api/v1/verify/${side}`, {}, { ...options, retries: 0 });
+    return this.#request("POST", `/api/v1/verify/${side}`, {}, { ...options, retries: options.retries ?? this.retries });
   }
 
   async forget(side, options = {}) {
@@ -178,6 +198,20 @@ class HttpFirmwareTransport {
   }
 
   async #request(method, pathname, body, options = {}) {
+    // Enqueue behind any in-flight gateway request so the ESP32 never receives
+    // concurrent TCP connections from this bridge instance.
+    let resolve, reject;
+    const result = new Promise((res, rej) => { resolve = res; reject = rej; });
+    this.#requestQueue = this.#requestQueue
+      .catch(() => {}) // previous request failure must not break the chain
+      .then(async () => {
+        try { resolve(await this.#doRequest(method, pathname, body, options)); }
+        catch (err) { reject(err); }
+      });
+    return result;
+  }
+
+  async #doRequest(method, pathname, body, options = {}) {
     const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : this.timeoutMs;
     const retries = Number.isInteger(options.retries) ? Math.max(0, options.retries) : 0;
     const baseDelayMs = Number.isFinite(options.retryBaseDelayMs) ? options.retryBaseDelayMs : 200;
