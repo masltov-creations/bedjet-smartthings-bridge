@@ -314,6 +314,11 @@ export const createBridgeServer = (options = {}) => {
     inFlight: null
   };
 
+  const invalidateGatewayStateCache = () => {
+    gatewayStateCache.fetchedAt = 0;
+    gatewayStateCache.value = null;
+  };
+
   const server = http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
@@ -383,6 +388,7 @@ export const createBridgeServer = (options = {}) => {
           const body = await parseBody(request);
           const result = await firmware.pair(side, body, firmwareOptions);
           store.savePairing(side, result.pairing);
+          invalidateGatewayStateCache();
           sendJson(response, 200, result);
           return;
         }
@@ -392,6 +398,7 @@ export const createBridgeServer = (options = {}) => {
           if (result.pairing) {
             store.savePairing(side, result.pairing);
           }
+          invalidateGatewayStateCache();
           sendJson(response, 200, result);
           return;
         }
@@ -400,12 +407,15 @@ export const createBridgeServer = (options = {}) => {
           const result = await firmware.forget(side, firmwareOptions);
           store.clearPairing(side);
           await engine.stopSide(side, "forgotten");
+          invalidateGatewayStateCache();
           sendJson(response, 200, result);
           return;
         }
 
         if (action === "release-ble") {
-          sendJson(response, 200, await firmware.releaseBle(side, firmwareOptions));
+          const result = await firmware.releaseBle(side, firmwareOptions);
+          invalidateGatewayStateCache();
+          sendJson(response, 200, result);
           return;
         }
 
@@ -413,13 +423,16 @@ export const createBridgeServer = (options = {}) => {
           const body = await parseBody(request);
           const result = await firmware.sendCommand(side, body, firmwareOptions);
           store.logCommand(side, "manual-command", body, result, true);
+          invalidateGatewayStateCache();
           sendJson(response, 200, result);
           return;
         }
       }
 
       if (request.method === "POST" && url.pathname === "/v1/system/release-ble") {
-        sendJson(response, 200, await firmware.releaseAll(firmwareOptions));
+        const result = await firmware.releaseAll(firmwareOptions);
+        invalidateGatewayStateCache();
+        sendJson(response, 200, result);
         return;
       }
 

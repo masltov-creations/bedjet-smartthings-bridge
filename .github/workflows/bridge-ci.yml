@@ -4,10 +4,12 @@ on:
   push:
     paths:
       - "bridge/**"
+      - "mock-gateway/**"
       - ".github/workflows/bridge-ci.yml"
   pull_request:
     paths:
       - "bridge/**"
+      - "mock-gateway/**"
       - ".github/workflows/bridge-ci.yml"
 
 jobs:
