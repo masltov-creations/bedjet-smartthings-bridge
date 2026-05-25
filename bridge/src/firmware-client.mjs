@@ -129,134 +129,239 @@ class SimulatedFirmwareTransport {
 }
 
 class HttpFirmwareTransport {
-  constructor(baseUrl, { gatewayId, sharedSecret }) {
+  constructor(baseUrl, { gatewayId, sharedSecret, timeoutMs, retries }) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
     this.gatewayId = gatewayId;
     this.sharedSecret = sharedSecret;
+    this.timeoutMs = timeoutMs;
+    this.retries = retries;
   }
 
-  async getState() {
-    return this.#request("GET", "/api/v1/state");
+  async getState(options = {}) {
+    return this.#request("GET", "/api/v1/state", undefined, { ...options, retries: options.retries ?? this.retries });
   }
 
-  async getClaimStatus() {
-    return this.#request("GET", "/api/v1/claim/status");
+  async getClaimStatus(options = {}) {
+    return this.#request("GET", "/api/v1/claim/status", undefined, { ...options, retries: options.retries ?? this.retries });
   }
 
-  async claimGateway(payload) {
-    return this.#request("POST", "/api/v1/claim", payload);
+  async claimGateway(payload, options = {}) {
+    return this.#request("POST", "/api/v1/claim", payload, { ...options, retries: 0 });
   }
 
-  async scan() {
-    return this.#request("GET", "/api/v1/scan");
+  async scan(options = {}) {
+    return this.#request("GET", "/api/v1/scan", undefined, { ...options, retries: options.retries ?? this.retries });
   }
 
-  async pair(side, candidate) {
-    return this.#request("POST", `/api/v1/pair/${side}`, candidate);
+  async pair(side, candidate, options = {}) {
+    return this.#request("POST", `/api/v1/pair/${side}`, candidate, { ...options, retries: 0 });
   }
 
-  async verify(side) {
-    return this.#request("POST", `/api/v1/verify/${side}`, {});
+  async verify(side, options = {}) {
+    return this.#request("POST", `/api/v1/verify/${side}`, {}, { ...options, retries: 0 });
   }
 
-  async forget(side) {
-    return this.#request("POST", `/api/v1/forget/${side}`, {});
+  async forget(side, options = {}) {
+    return this.#request("POST", `/api/v1/forget/${side}`, {}, { ...options, retries: 0 });
   }
 
-  async releaseBle(side) {
-    return this.#request("POST", `/api/v1/release/${side}`, {});
+  async releaseBle(side, options = {}) {
+    return this.#request("POST", `/api/v1/release/${side}`, {}, { ...options, retries: 0 });
   }
 
-  async releaseAll() {
-    return this.#request("POST", "/api/v1/release-all", {});
+  async releaseAll(options = {}) {
+    return this.#request("POST", "/api/v1/release-all", {}, { ...options, retries: 0 });
   }
 
-  async sendCommand(side, command) {
-    return this.#request("POST", `/api/v1/command/${side}`, command);
+  async sendCommand(side, command, options = {}) {
+    return this.#request("POST", `/api/v1/command/${side}`, command, { ...options, retries: 0 });
   }
 
-  async #request(method, pathname, body) {
-    const headers = { Accept: "application/json" };
+  async #request(method, pathname, body, options = {}) {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : this.timeoutMs;
+    const retries = Number.isInteger(options.retries) ? Math.max(0, options.retries) : 0;
+    const baseDelayMs = Number.isFinite(options.retryBaseDelayMs) ? options.retryBaseDelayMs : 200;
+    const externalSignal = options.signal;
+
     let payload = "";
-
     if (body !== undefined) {
       payload = JSON.stringify(body);
-      headers["Content-Type"] = "application/json";
     }
 
-    if (this.sharedSecret) {
-      const timestamp = String(Date.now());
-      const nonce = crypto.randomBytes(12).toString("hex");
-      const payloadToSign = [method.toUpperCase(), pathname, payload, timestamp, nonce].join("\n");
-      const signature = crypto.createHmac("sha256", this.sharedSecret).update(payloadToSign).digest("hex");
-      headers["X-Gateway-Id"] = this.gatewayId;
-      headers["X-Timestamp"] = timestamp;
-      headers["X-Nonce"] = nonce;
-      headers["X-Signature"] = signature;
+    const retryableStatusCodes = new Set([408, 425, 429, 500, 502, 503, 504]);
+    const isRetryableError = (error) => {
+      if (!error) {
+        return false;
+      }
+      if (error.name === "AbortError") {
+        return false;
+      }
+      if (error instanceof FirmwareRequestError && Number.isInteger(error.status)) {
+        return retryableStatusCodes.has(error.status);
+      }
+      return true;
+    };
+
+    const buildHeaders = () => {
+      const headers = { Accept: "application/json" };
+      if (body !== undefined) {
+        headers["Content-Type"] = "application/json";
+      }
+
+      if (this.sharedSecret) {
+        const timestamp = String(Date.now());
+        const nonce = crypto.randomBytes(12).toString("hex");
+        const payloadToSign = [method.toUpperCase(), pathname, payload, timestamp, nonce].join("\n");
+        const signature = crypto.createHmac("sha256", this.sharedSecret).update(payloadToSign).digest("hex");
+        headers["X-Gateway-Id"] = this.gatewayId;
+        headers["X-Timestamp"] = timestamp;
+        headers["X-Nonce"] = nonce;
+        headers["X-Signature"] = signature;
+      }
+
+      return headers;
+    };
+
+    const makeAbortSignal = () => {
+      if (!timeoutMs && !externalSignal) {
+        return { signal: undefined, cleanup: () => {} };
+      }
+
+      const controller = new AbortController();
+      const timers = [];
+      let removeExternalListener = null;
+
+      if (timeoutMs) {
+        const timer = setTimeout(() => controller.abort(new Error("Firmware request timed out")), timeoutMs);
+        timer.unref?.();
+        timers.push(timer);
+      }
+
+      if (externalSignal) {
+        if (externalSignal.aborted) {
+          controller.abort(externalSignal.reason);
+        } else {
+          const onAbort = () => {
+            controller.abort(externalSignal.reason);
+          };
+          externalSignal.addEventListener("abort", onAbort, { once: true });
+          removeExternalListener = () => externalSignal.removeEventListener("abort", onAbort);
+        }
+      }
+
+      return {
+        signal: controller.signal,
+        cleanup: () => {
+          for (const timer of timers) {
+            clearTimeout(timer);
+          }
+          removeExternalListener?.();
+        }
+      };
+    };
+
+    const parseJsonResponse = (text, status) => {
+      if (!text) {
+        return {};
+      }
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new FirmwareRequestError(`Firmware returned invalid JSON (HTTP ${status})`, 502);
+      }
+    };
+
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      const { signal, cleanup } = makeAbortSignal();
+      try {
+        const response = await fetch(`${this.baseUrl}${pathname}`, {
+          method,
+          headers: buildHeaders(),
+          body: payload || undefined,
+          signal
+        });
+
+        const text = await response.text();
+        const data = parseJsonResponse(text, response.status);
+
+        if (!response.ok) {
+          throw new FirmwareRequestError(data.error || `Firmware request failed: ${response.status}`, response.status);
+        }
+
+        return data;
+      } catch (error) {
+        if (attempt >= retries || method.toUpperCase() !== "GET" || !isRetryableError(error)) {
+          throw error;
+        }
+
+        const delayMs = baseDelayMs * 2 ** attempt + Math.floor(Math.random() * 75);
+        await sleep(delayMs);
+      } finally {
+        cleanup();
+      }
     }
 
-    const response = await fetch(`${this.baseUrl}${pathname}`, {
-      method,
-      headers,
-      body: payload || undefined
-    });
-
-    const text = await response.text();
-    const data = text ? JSON.parse(text) : {};
-    if (!response.ok) {
-      throw new FirmwareRequestError(data.error || `Firmware request failed: ${response.status}`, response.status);
-    }
-    return data;
+    throw new FirmwareRequestError("Firmware request failed after retries", 503);
   }
 }
 
 export class FirmwareClient {
-  constructor({ simulateFirmware, firmwareApiBaseUrl, firmwareGatewayId, firmwareSharedSecret, logger }) {
+  constructor({
+    simulateFirmware,
+    firmwareApiBaseUrl,
+    firmwareGatewayId,
+    firmwareSharedSecret,
+    firmwareRequestTimeoutMs,
+    firmwareRequestRetries,
+    logger
+  }) {
     this.transport = simulateFirmware
       ? new SimulatedFirmwareTransport(logger)
       : new HttpFirmwareTransport(firmwareApiBaseUrl, {
           gatewayId: firmwareGatewayId,
-          sharedSecret: firmwareSharedSecret
+          sharedSecret: firmwareSharedSecret,
+          timeoutMs: firmwareRequestTimeoutMs,
+          retries: firmwareRequestRetries
         });
   }
 
-  getState() {
-    return this.transport.getState();
+  getState(options) {
+    return this.transport.getState(options);
   }
 
-  getClaimStatus() {
-    return this.transport.getClaimStatus();
+  getClaimStatus(options) {
+    return this.transport.getClaimStatus(options);
   }
 
-  claimGateway(payload) {
-    return this.transport.claimGateway(payload);
+  claimGateway(payload, options) {
+    return this.transport.claimGateway(payload, options);
   }
 
-  scan() {
-    return this.transport.scan();
+  scan(options) {
+    return this.transport.scan(options);
   }
 
-  pair(side, candidate) {
-    return this.transport.pair(side, candidate);
+  pair(side, candidate, options) {
+    return this.transport.pair(side, candidate, options);
   }
 
-  verify(side) {
-    return this.transport.verify(side);
+  verify(side, options) {
+    return this.transport.verify(side, options);
   }
 
-  forget(side) {
-    return this.transport.forget(side);
+  forget(side, options) {
+    return this.transport.forget(side, options);
   }
 
-  releaseBle(side) {
-    return this.transport.releaseBle(side);
+  releaseBle(side, options) {
+    return this.transport.releaseBle(side, options);
   }
 
-  releaseAll() {
-    return this.transport.releaseAll();
+  releaseAll(options) {
+    return this.transport.releaseAll(options);
   }
 
-  sendCommand(side, command) {
-    return this.transport.sendCommand(side, command);
+  sendCommand(side, command, options) {
+    return this.transport.sendCommand(side, command, options);
   }
 }

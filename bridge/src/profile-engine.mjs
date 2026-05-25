@@ -37,6 +37,24 @@ export class ProfileEngine {
     this.scheduler = null;
   }
 
+  #cancelTimersForSide(side, { exceptKey } = {}) {
+    for (const [key, timer] of this.timers.entries()) {
+      if (!key.startsWith(runKey(side))) {
+        continue;
+      }
+      if (exceptKey && key === exceptKey) {
+        continue;
+      }
+      clearTimeout(timer);
+      this.timers.delete(key);
+    }
+  }
+
+  #currentRunMatches(side, runId) {
+    const run = this.store.getRun(side);
+    return Boolean(run && run.status === "running" && run.runId === runId);
+  }
+
   start() {
     this.store.interruptActiveRuns();
     this.scheduler = setInterval(() => {
@@ -70,9 +88,11 @@ export class ProfileEngine {
     await this.stopSide(profile.side, "replaced");
 
     const startedAt = new Date();
+    const runId = `${startedAt.getTime()}-${Math.random().toString(16).slice(2)}`;
     const run = {
       side: profile.side,
       profileId: profile.id,
+      runId,
       status: "running",
       launchedBy,
       startedAt: startedAt.toISOString(),
@@ -82,31 +102,66 @@ export class ProfileEngine {
 
     this.store.saveRun(profile.side, run);
 
+    if (profile.steps.length === 0) {
+      this.store.saveRun(profile.side, {
+        ...run,
+        status: "completed",
+        completedAt: new Date().toISOString(),
+        lastExecutedStepIndex: -1
+      });
+      return this.store.getRun(profile.side);
+    }
+
     profile.steps.forEach((step, index) => {
       const timeoutMs = Math.max(0, step.offsetMinutes * 60_000);
+      const timerKey = `${runKey(profile.side)}:${index}`;
       const timer = setTimeout(async () => {
+        this.timers.delete(timerKey);
+
+        if (!this.#currentRunMatches(profile.side, runId)) {
+          return;
+        }
+
         try {
           const response = await this.firmware.sendCommand(profile.side, step.command);
           this.store.logCommand(profile.side, "profile-step", step.command, response, true);
+          if (!this.#currentRunMatches(profile.side, runId)) {
+            return;
+          }
+
+          const current = this.store.getRun(profile.side);
+          const nextStatus = index === profile.steps.length - 1 ? "completed" : "running";
           this.store.saveRun(profile.side, {
-            ...this.store.getRun(profile.side),
-            status: index === profile.steps.length - 1 ? "completed" : "running",
+            ...current,
+            status: nextStatus,
             lastExecutedStepIndex: index,
-            lastStepExecutedAt: new Date().toISOString()
+            lastStepExecutedAt: new Date().toISOString(),
+            completedAt: nextStatus === "completed" ? new Date().toISOString() : current.completedAt
           });
+
+          if (nextStatus === "completed") {
+            this.#cancelTimersForSide(profile.side);
+          }
         } catch (error) {
           this.store.logCommand(profile.side, "profile-step", step.command, { error: error.message }, false);
+
+          if (!this.#currentRunMatches(profile.side, runId)) {
+            return;
+          }
+
+          const current = this.store.getRun(profile.side);
           this.store.saveRun(profile.side, {
-            ...this.store.getRun(profile.side),
+            ...current,
             status: "failed",
             lastExecutedStepIndex: index,
             lastError: error.message,
             failedAt: new Date().toISOString()
           });
+          this.#cancelTimersForSide(profile.side);
         }
       }, timeoutMs);
 
-      this.timers.set(`${runKey(profile.side)}:${index}`, timer);
+      this.timers.set(timerKey, timer);
     });
 
     return this.store.getRun(profile.side);
@@ -122,12 +177,7 @@ export class ProfileEngine {
 
   async stopSide(side, reason = "manual-stop") {
     const run = this.store.getRun(side);
-    for (const [key, timer] of this.timers.entries()) {
-      if (key.startsWith(runKey(side))) {
-        clearTimeout(timer);
-        this.timers.delete(key);
-      }
-    }
+    this.#cancelTimersForSide(side);
 
     if (!run) {
       return null;
@@ -168,4 +218,3 @@ export class ProfileEngine {
     }
   }
 }
-

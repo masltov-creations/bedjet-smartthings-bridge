@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import { createBridgeServer, validateRuntimeConfig } from "../src/server.mjs";
 import { BridgeStore } from "../src/store.mjs";
@@ -17,6 +18,34 @@ const logger = {
   warn() {},
   error() {}
 };
+
+const requestRaw = (port, pathname, { method = "GET", headers = {}, body } = {}) => new Promise((resolve, reject) => {
+  const request = http.request(
+    {
+      host: "127.0.0.1",
+      port,
+      path: pathname,
+      method,
+      headers
+    },
+    (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        resolve({
+          statusCode: response.statusCode,
+          payload: text ? JSON.parse(text) : {}
+        });
+      });
+    }
+  );
+  request.on("error", reject);
+  if (body !== undefined) {
+    request.write(body);
+  }
+  request.end();
+});
 
 test("store seeds default profiles and firmware simulator scans", async () => {
   const store = new BridgeStore(makeTempDb());
@@ -116,6 +145,91 @@ test("profile engine starts a profile against the simulated firmware", async () 
   store.close();
 });
 
+test("profile engine immediately completes empty profiles", async () => {
+  const store = new BridgeStore(makeTempDb());
+  const firmware = new FirmwareClient({
+    simulateFirmware: true,
+    firmwareApiBaseUrl: "http://bedjet-gateway.local",
+    logger
+  });
+
+  store.saveProfile({
+    id: "left-empty",
+    name: "Left Empty",
+    side: "left",
+    enabled: true,
+    steps: [],
+    schedule: { enabled: false, localTime: "00:00", daysOfWeek: [] },
+    metadata: {}
+  });
+
+  const engine = new ProfileEngine({
+    store,
+    firmware,
+    logger,
+    timezone: "America/Los_Angeles",
+    schedulerIntervalMs: 30_000
+  });
+
+  const run = await engine.startProfile("left-empty");
+  assert.equal(run.status, "completed");
+  assert.equal(run.lastExecutedStepIndex, -1);
+  assert.ok(run.completedAt);
+
+  engine.stop();
+  store.close();
+});
+
+test("profile engine cancels remaining timers when run is stopped", async () => {
+  const store = new BridgeStore(makeTempDb());
+  const firmware = new FirmwareClient({
+    simulateFirmware: true,
+    firmwareApiBaseUrl: "http://bedjet-gateway.local",
+    logger
+  });
+
+  const pairResult = await firmware.pair("left", {
+    deviceId: "bedjet-3-left-demo",
+    displayName: "BedJet 3 Left Demo"
+  });
+  store.savePairing("left", pairResult.pairing);
+
+  store.saveProfile({
+    id: "left-cancelled-run",
+    name: "Left Cancelled Run",
+    side: "left",
+    enabled: true,
+    steps: [
+      { offsetMinutes: 0, command: { power: "on", mode: "cool", fanStep: 8, targetTemperatureC: 24 } },
+      { offsetMinutes: 0.01, command: { power: "on", mode: "cool", fanStep: 4, targetTemperatureC: 22 } }
+    ],
+    schedule: { enabled: false, localTime: "00:00", daysOfWeek: [] },
+    metadata: {}
+  });
+
+  const engine = new ProfileEngine({
+    store,
+    firmware,
+    logger,
+    timezone: "America/Los_Angeles",
+    schedulerIntervalMs: 30_000
+  });
+
+  await engine.startProfile("left-cancelled-run");
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  await engine.stopProfile("left-cancelled-run");
+  await new Promise((resolve) => setTimeout(resolve, 620));
+
+  const run = store.getRun("left");
+  const profileStepCommands = store.recentCommands().filter((entry) => entry.action === "profile-step");
+
+  assert.equal(run.status, "stopped");
+  assert.equal(profileStepCommands.length, 1);
+
+  engine.stop();
+  store.close();
+});
+
 test("bridge exposes version and readiness endpoints in simulated mode", async (t) => {
   const app = createBridgeServer({
     config: {
@@ -179,6 +293,84 @@ test("bridge rejects oversized JSON bodies", async (t) => {
   assert.match(payload.error, /exceeds 16384 bytes/);
 });
 
+test("bridge shared-secret auth enforces X-Bridge-Token while keeping /healthz open", async (t) => {
+  const app = createBridgeServer({
+    config: {
+      host: "127.0.0.1",
+      port: 0,
+      dataPath: makeTempDb(),
+      simulateFirmware: true,
+      bridgeSharedSecret: "bridge-secret-value"
+    },
+    logger
+  });
+
+  await app.start();
+  t.after(async () => {
+    await app.stop();
+  });
+
+  const { port } = app.server.address();
+
+  const healthz = await fetch(`http://127.0.0.1:${port}/healthz`);
+  assert.equal(healthz.status, 200);
+
+  const unauthenticated = await fetch(`http://127.0.0.1:${port}/v1/version`);
+  assert.equal(unauthenticated.status, 401);
+
+  const multiValueHeader = await requestRaw(port, "/v1/version", {
+    headers: {
+      "X-Bridge-Token": ["bridge-secret-value", "ignored-secondary-token"]
+    }
+  });
+  assert.equal(multiValueHeader.statusCode, 200);
+});
+
+test("bridge returns 502 for firmware non-JSON responses without echoing upstream body", async (t) => {
+  const firmwareServer = http.createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/api/v1/state") {
+      response.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+      response.end("sensitive-gateway-body");
+      return;
+    }
+
+    response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify({ claimed: true, gatewayId: "bedjet-bridge", sides: { left: {}, right: {} } }));
+  });
+
+  await new Promise((resolve) => firmwareServer.listen(0, "127.0.0.1", resolve));
+  t.after(() => {
+    firmwareServer.close();
+  });
+
+  const firmwarePort = firmwareServer.address().port;
+  const app = createBridgeServer({
+    config: {
+      host: "127.0.0.1",
+      port: 0,
+      dataPath: makeTempDb(),
+      simulateFirmware: false,
+      firmwareApiBaseUrl: `http://127.0.0.1:${firmwarePort}`,
+      firmwareGatewayId: "bedjet-bridge",
+      firmwareSharedSecret: "1234567890abcdef"
+    },
+    logger
+  });
+
+  await app.start();
+  t.after(async () => {
+    await app.stop();
+  });
+
+  const { port } = app.server.address();
+  const response = await fetch(`http://127.0.0.1:${port}/v1/bedjets`);
+  const payload = await response.json();
+
+  assert.equal(response.status, 502);
+  assert.match(payload.error, /Firmware returned invalid JSON/);
+  assert.doesNotMatch(payload.error, /sensitive-gateway-body/);
+});
+
 test("bridge validation fails in live mode without required firmware auth config", () => {
   assert.throws(() => {
     validateRuntimeConfig({
@@ -190,7 +382,10 @@ test("bridge validation fails in live mode without required firmware auth config
       firmwareGatewayId: "bedjet-bridge",
       firmwareSharedSecret: "",
       simulateFirmware: false,
-      schedulerIntervalMs: 30_000
+      schedulerIntervalMs: 30_000,
+      firmwareRequestTimeoutMs: 4_000,
+      firmwareRequestRetries: 2,
+      gatewayStateCacheMs: 1_000
     });
   }, /Missing required live bridge config: FIRMWARE_SHARED_SECRET/);
 });

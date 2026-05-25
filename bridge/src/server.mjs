@@ -65,7 +65,7 @@ const sendJson = (response, statusCode, payload) => {
 
 const assertSide = (side) => {
   if (!allowedSides.has(side)) {
-    throw new Error(`Invalid side: ${side}`);
+    throw new HttpError(400, `Invalid side: ${side}`);
   }
 };
 
@@ -116,10 +116,68 @@ const syncStorePairingsFromGatewayState = (store, gatewayState) => {
   }
 };
 
-const getSynchronizedGatewayState = async ({ store, firmware }) => {
-  const gatewayState = await firmware.getState();
-  syncStorePairingsFromGatewayState(store, gatewayState);
-  return gatewayState;
+const getSynchronizedGatewayState = async ({ store, firmware, cache, firmwareOptions }) => {
+  const now = Date.now();
+  if (cache?.value && Number.isFinite(cache.fetchedAt) && now - cache.fetchedAt < cache.ttlMs) {
+    return cache.value;
+  }
+
+  if (cache?.inFlight) {
+    return cache.inFlight;
+  }
+
+  const promise = (async () => {
+    const gatewayState = await firmware.getState(firmwareOptions);
+    syncStorePairingsFromGatewayState(store, gatewayState);
+    if (cache) {
+      cache.value = gatewayState;
+      cache.fetchedAt = Date.now();
+    }
+    return gatewayState;
+  })();
+
+  if (cache) {
+    cache.inFlight = promise.finally(() => {
+      cache.inFlight = null;
+    });
+    return cache.inFlight;
+  }
+
+  return promise;
+};
+
+const requireBridgeAuth = ({ runtimeConfig, request, pathname }) => {
+  if (!runtimeConfig.bridgeSharedSecret) {
+    return;
+  }
+
+  if (pathname === "/healthz") {
+    return;
+  }
+
+  const bridgeTokenHeader = request.headers["x-bridge-token"];
+  const tokenValue = Array.isArray(bridgeTokenHeader) ? (bridgeTokenHeader[0] || "") : (bridgeTokenHeader || "");
+  const token = tokenValue.split(",")[0].trim();
+  if (token !== runtimeConfig.bridgeSharedSecret) {
+    throw new HttpError(401, "Unauthorized");
+  }
+};
+
+const getFirmwareRequestOptions = ({ runtimeConfig, request, response }) => {
+  const controller = new AbortController();
+
+  const abort = () => controller.abort(new Error("Client disconnected"));
+  request.on("aborted", abort);
+  response.on("close", () => {
+    if (!response.writableEnded) {
+      abort();
+    }
+  });
+
+  return {
+    signal: controller.signal,
+    timeoutMs: runtimeConfig.firmwareRequestTimeoutMs
+  };
 };
 
 export const validateRuntimeConfig = (runtimeConfig) => {
@@ -129,6 +187,18 @@ export const validateRuntimeConfig = (runtimeConfig) => {
 
   if (!Number.isInteger(runtimeConfig.schedulerIntervalMs) || runtimeConfig.schedulerIntervalMs < 1_000) {
     throw new Error("SCHEDULER_INTERVAL_MS must be at least 1000");
+  }
+
+  if (!Number.isInteger(runtimeConfig.firmwareRequestTimeoutMs) || runtimeConfig.firmwareRequestTimeoutMs < 250) {
+    throw new Error("FIRMWARE_REQUEST_TIMEOUT_MS must be at least 250");
+  }
+
+  if (!Number.isInteger(runtimeConfig.firmwareRequestRetries) || runtimeConfig.firmwareRequestRetries < 0 || runtimeConfig.firmwareRequestRetries > 10) {
+    throw new Error("FIRMWARE_REQUEST_RETRIES must be between 0 and 10");
+  }
+
+  if (!Number.isInteger(runtimeConfig.gatewayStateCacheMs) || runtimeConfig.gatewayStateCacheMs < 0 || runtimeConfig.gatewayStateCacheMs > 60_000) {
+    throw new Error("GATEWAY_STATE_CACHE_MS must be between 0 and 60000");
   }
 
   if (runtimeConfig.simulateFirmware) {
@@ -175,8 +245,9 @@ const buildVersionSnapshot = (runtimeConfig) => ({
 
 const buildReadinessSnapshot = async ({ runtimeConfig, firmware }) => {
   try {
-    const gatewayClaim = await firmware.getClaimStatus();
-    const gatewayState = await firmware.getState();
+    const firmwareOptions = { timeoutMs: runtimeConfig.firmwareRequestTimeoutMs };
+    const gatewayClaim = await firmware.getClaimStatus(firmwareOptions);
+    const gatewayState = await firmware.getState(firmwareOptions);
     return {
       ok: Boolean(gatewayClaim?.claimed),
       service: "bedjet-bridge",
@@ -200,8 +271,8 @@ const buildReadinessSnapshot = async ({ runtimeConfig, firmware }) => {
   }
 };
 
-const buildSystemSnapshot = async ({ runtimeConfig, store, firmware, engine }) => {
-  const gatewayState = await getSynchronizedGatewayState({ store, firmware });
+const buildSystemSnapshot = async ({ runtimeConfig, store, firmware, engine, cache, firmwareOptions }) => {
+  const gatewayState = await getSynchronizedGatewayState({ store, firmware, cache, firmwareOptions });
   return {
     bridge: {
       host: runtimeConfig.host,
@@ -210,13 +281,17 @@ const buildSystemSnapshot = async ({ runtimeConfig, store, firmware, engine }) =
       simulateFirmware: runtimeConfig.simulateFirmware,
       firmwareApiBaseUrl: runtimeConfig.firmwareApiBaseUrl,
       firmwareGatewayId: runtimeConfig.firmwareGatewayId,
-      firmwareSharedSecretConfigured: Boolean(runtimeConfig.firmwareSharedSecret)
+      firmwareSharedSecretConfigured: Boolean(runtimeConfig.firmwareSharedSecret),
+      bridgeSharedSecretConfigured: Boolean(runtimeConfig.bridgeSharedSecret),
+      firmwareRequestTimeoutMs: runtimeConfig.firmwareRequestTimeoutMs,
+      firmwareRequestRetries: runtimeConfig.firmwareRequestRetries,
+      gatewayStateCacheMs: runtimeConfig.gatewayStateCacheMs
     },
     pairings: store.getPairings(),
     profiles: store.listProfiles(),
     runs: engine.listRuns(),
     recentCommands: store.recentCommands(),
-    gatewayClaim: await firmware.getClaimStatus(),
+    gatewayClaim: await firmware.getClaimStatus(firmwareOptions),
     gatewayState
   };
 };
@@ -234,9 +309,24 @@ export const createBridgeServer = (options = {}) => {
     schedulerIntervalMs: runtimeConfig.schedulerIntervalMs
   });
 
+  const gatewayStateCache = {
+    ttlMs: runtimeConfig.gatewayStateCacheMs,
+    fetchedAt: 0,
+    value: null,
+    inFlight: null
+  };
+
+  const invalidateGatewayStateCache = () => {
+    gatewayStateCache.fetchedAt = 0;
+    gatewayStateCache.value = null;
+  };
+
   const server = http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
+      requireBridgeAuth({ runtimeConfig, request, pathname: url.pathname });
+      const firmwareOptions = getFirmwareRequestOptions({ runtimeConfig, request, response });
+      const stateFirmwareOptions = { timeoutMs: runtimeConfig.firmwareRequestTimeoutMs };
 
       if (request.method === "GET" && url.pathname === "/healthz") {
         sendJson(response, 200, { ok: true, service: "bedjet-bridge" });
@@ -255,12 +345,19 @@ export const createBridgeServer = (options = {}) => {
       }
 
       if (request.method === "GET" && url.pathname === "/v1/system") {
-        sendJson(response, 200, await buildSystemSnapshot({ runtimeConfig, store, firmware, engine }));
+        sendJson(response, 200, await buildSystemSnapshot({
+          runtimeConfig,
+          store,
+          firmware,
+          engine,
+          cache: gatewayStateCache,
+          firmwareOptions: stateFirmwareOptions
+        }));
         return;
       }
 
       if (request.method === "GET" && url.pathname === "/v1/bedjets") {
-        const gatewayState = await getSynchronizedGatewayState({ store, firmware });
+        const gatewayState = await getSynchronizedGatewayState({ store, firmware, cache: gatewayStateCache, firmwareOptions: stateFirmwareOptions });
         sendJson(response, 200, { pairings: store.getPairings(), gatewayState });
         return;
       }
@@ -268,7 +365,7 @@ export const createBridgeServer = (options = {}) => {
       const bedjetReadMatch = url.pathname.match(/^\/v1\/bedjets\/(left|right)$/);
       if (request.method === "GET" && bedjetReadMatch) {
         const [, side] = bedjetReadMatch;
-        const gatewayState = await getSynchronizedGatewayState({ store, firmware });
+        const gatewayState = await getSynchronizedGatewayState({ store, firmware, cache: gatewayStateCache, firmwareOptions: stateFirmwareOptions });
         sendJson(response, 200, {
           side,
           pairing: store.getPairing(side),
@@ -280,7 +377,7 @@ export const createBridgeServer = (options = {}) => {
       }
 
       if (request.method === "POST" && url.pathname === "/v1/bedjets/scan") {
-        sendJson(response, 200, await firmware.scan());
+        sendJson(response, 200, await firmware.scan(stateFirmwareOptions));
         return;
       }
 
@@ -291,45 +388,53 @@ export const createBridgeServer = (options = {}) => {
 
         if (action === "pair") {
           const body = await parseBody(request);
-          const result = await firmware.pair(side, body);
+          const result = await firmware.pair(side, body, firmwareOptions);
           store.savePairing(side, result.pairing);
+          invalidateGatewayStateCache();
           sendJson(response, 200, result);
           return;
         }
 
         if (action === "verify") {
-          const result = await firmware.verify(side);
+          const result = await firmware.verify(side, firmwareOptions);
           if (result.pairing) {
             store.savePairing(side, result.pairing);
           }
+          invalidateGatewayStateCache();
           sendJson(response, 200, result);
           return;
         }
 
         if (action === "forget") {
-          const result = await firmware.forget(side);
+          const result = await firmware.forget(side, firmwareOptions);
           store.clearPairing(side);
           await engine.stopSide(side, "forgotten");
+          invalidateGatewayStateCache();
           sendJson(response, 200, result);
           return;
         }
 
         if (action === "release-ble") {
-          sendJson(response, 200, await firmware.releaseBle(side));
+          const result = await firmware.releaseBle(side, firmwareOptions);
+          invalidateGatewayStateCache();
+          sendJson(response, 200, result);
           return;
         }
 
         if (action === "command") {
           const body = await parseBody(request);
-          const result = await firmware.sendCommand(side, body);
+          const result = await firmware.sendCommand(side, body, firmwareOptions);
           store.logCommand(side, "manual-command", body, result, true);
+          invalidateGatewayStateCache();
           sendJson(response, 200, result);
           return;
         }
       }
 
       if (request.method === "POST" && url.pathname === "/v1/system/release-ble") {
-        sendJson(response, 200, await firmware.releaseAll());
+        const result = await firmware.releaseAll(firmwareOptions);
+        invalidateGatewayStateCache();
+        sendJson(response, 200, result);
         return;
       }
 
@@ -388,7 +493,15 @@ export const createBridgeServer = (options = {}) => {
       sendJson(response, 404, { error: "Not found" });
     } catch (error) {
       logger.error("Request failed", { error: error.message });
-      const statusCode = Number.isInteger(error.status) ? error.status : 500;
+      let statusCode = Number.isInteger(error.status) ? error.status : 500;
+      if (error.name === "AbortError" || error.message === "Firmware request timed out") {
+        statusCode = 504;
+      } else if (statusCode === 500 && (error.cause || error.name === "TypeError")) {
+        statusCode = 502;
+      }
+      if (response.writableEnded || response.destroyed) {
+        return;
+      }
       sendJson(response, statusCode, { error: error.message });
     }
   });

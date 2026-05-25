@@ -140,6 +140,7 @@ If your firmware binary grows past the OTA app slot limit, OTA will stop being f
 2. Do not expose bridge `8787` or gateway `80` to WAN.
 3. Keep secrets out of git:
    - `FIRMWARE_SHARED_SECRET`
+   - `BRIDGE_SHARED_SECRET` (optional bridge API auth)
    - `gatewaySharedSecret`
 4. Rotate claim/secret if exposure is suspected.
 
@@ -293,6 +294,8 @@ ssh <ssh-target> "curl -fsS http://127.0.0.1:8787/v1/version"
 ssh <ssh-target> "curl -fsS http://127.0.0.1:8787/v1/system"
 ```
 
+If you configured `BRIDGE_SHARED_SECRET`, add `-H 'X-Bridge-Token: <secret>'` to the curl commands above.
+
 ### Step 3: SmartThings Edge Driver
 
 You need:
@@ -327,6 +330,7 @@ XDG_STATE_HOME=/tmp smartthings edge:drivers:package <repo-root>/smartthings-edg
    - `bridgeHost=<SmartThings driver host from setup output>`
    - `bridgeFallbackIp=<SmartThings bridge fallback LAN IPv4>`
    - `bridgePort=<SmartThings driver port from setup output>`
+   - `bridgeToken=<BRIDGE_SHARED_SECRET>` (only when bridge auth is enabled)
    - Apply to both unit devices and both launcher devices.
    - Note: SmartThings currently does not provide a reliable non-interactive API/CLI path to bulk write Edge device preferences for existing devices. Use the app device settings when needed.
 8. Set side mapping in preferences:
