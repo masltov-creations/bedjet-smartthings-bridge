@@ -220,6 +220,7 @@ end
 local function request_json_using_host(host, device, method, path, body)
   local port = get_bridge_port(device)
   local token = get_bridge_token(device)
+  token = token:gsub("[%c]", "")
 
   local client = assert(socket.tcp())
   client:settimeout(DEFAULT_SOCKET_TIMEOUT_SECONDS)
@@ -276,7 +277,7 @@ local function request_json_using_host(host, device, method, path, body)
 
   local ok_decode, decoded_or_err = pcall(json.decode, response_body)
   if not ok_decode then
-    error("Bridge returned invalid JSON")
+    error(string.format("Bridge returned invalid JSON (HTTP %d): %s", status_code, tostring(decoded_or_err)))
   end
 
   local decoded = decoded_or_err

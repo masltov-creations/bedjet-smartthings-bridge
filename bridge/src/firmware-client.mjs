@@ -267,8 +267,7 @@ class HttpFirmwareTransport {
       try {
         return JSON.parse(text);
       } catch {
-        const snippet = text.slice(0, 240);
-        throw new FirmwareRequestError(`Firmware returned non-JSON response (HTTP ${status}): ${snippet}`, status);
+        throw new FirmwareRequestError(`Firmware returned invalid JSON (HTTP ${status})`, 502);
       }
     };
 

@@ -155,7 +155,9 @@ const requireBridgeAuth = ({ runtimeConfig, request, pathname }) => {
     return;
   }
 
-  const token = request.headers["x-bridge-token"] || "";
+  const bridgeTokenHeader = request.headers["x-bridge-token"];
+  const tokenValue = Array.isArray(bridgeTokenHeader) ? (bridgeTokenHeader[0] || "") : (bridgeTokenHeader || "");
+  const token = tokenValue.split(",")[0].trim();
   if (token !== runtimeConfig.bridgeSharedSecret) {
     throw new HttpError(401, "Unauthorized");
   }
@@ -496,6 +498,9 @@ export const createBridgeServer = (options = {}) => {
         statusCode = 504;
       } else if (statusCode === 500 && (error.cause || error.name === "TypeError")) {
         statusCode = 502;
+      }
+      if (response.writableEnded || response.destroyed) {
+        return;
       }
       sendJson(response, statusCode, { error: error.message });
     }
