@@ -58,7 +58,74 @@ local function schedule_refresh_burst(device)
   schedule_refresh(device, 4)
 end
 
-local function remember_unit_status(device, status)
+local function schedule_expedited_refresh_burst(device)
+  -- Immediate + aggressive polling after commands
+  -- 100ms, 500ms, then relax to 1s, 4s
+  schedule_refresh(device, 0.1)
+  schedule_refresh(device, 0.5)
+  schedule_refresh(device, 1)
+  schedule_refresh(device, 4)
+end
+
+local function handle_state_mismatch(device)
+  -- Detect if current state doesn't match remembered state
+  -- If mismatch, tighten polling interval to 1-2s for 3-4 cycles
+  -- Then relax back to normal 5s interval
+  local mismatch_cycles = tonumber(device:get_field(fields.MISMATCH_CYCLES) or 0)
+  local last_mismatch_at_ms = tonumber(device:get_field(fields.LAST_MISMATCH_AT_MS) or 0)
+  local current_time_ms = os.time() * 1000  -- Approximate milliseconds
+  
+  -- Reset counter if > 5 minutes since last mismatch
+  if last_mismatch_at_ms > 0 and (current_time_ms - last_mismatch_at_ms) > 300000 then
+    mismatch_cycles = 0
+  end
+  
+  if mismatch_cycles > 0 then
+    mismatch_cycles = mismatch_cycles + 1
+    -- Keep tight polling for 3 cycles, then relax
+    if mismatch_cycles > 3 then
+      device:set_field(fields.MISMATCH_CYCLES, 0)
+      device:set_field(fields.LAST_MISMATCH_AT_MS, nil)
+      -- Allow poll interval to return to normal
+    else
+      device:set_field(fields.MISMATCH_CYCLES, mismatch_cycles)
+      device:set_field(fields.LAST_MISMATCH_AT_MS, current_time_ms)
+    end
+  end
+end
+
+local function detect_state_mismatch(device, current_status)
+  -- Compare current reported status against remembered status
+  -- If mismatch detected, trigger adaptive backoff
+  if not current_status then
+    return
+  end
+  
+  local remembered = get_remembered_unit_status(device)
+  if not remembered then
+    return  -- No previous state to compare
+  end
+  
+  local mismatch = false
+  
+  -- Check each field for mismatch
+  if (remembered.power or "off") ~= (current_status.power or "off") then
+    mismatch = true
+  elseif (remembered.mode or "cool") ~= (current_status.mode or "cool") then
+    mismatch = true
+  elseif (remembered.fan_step or 8) ~= tonumber(current_status.fanStep or 8) then
+    mismatch = true
+  elseif (remembered.target_temperature_c or 24) ~= tonumber(current_status.targetTemperatureC or 24) then
+    mismatch = true
+  end
+  
+  if mismatch then
+    log.info(string.format("State mismatch detected: remembered=%s, current=%s", 
+      tostring(remembered), tostring(current_status)))
+    device:set_field(fields.MISMATCH_CYCLES, 1)
+    device:set_field(fields.LAST_MISMATCH_AT_MS, os.time() * 1000)
+  end
+end
   if not status or type(status) ~= "table" then
     return
   end
@@ -406,14 +473,14 @@ function M.switch_on(_, device)
     else
       emit_switch(device, true)
     end
-    schedule_refresh_burst(device)
+    schedule_expedited_refresh_burst(device)
     return
   end
 
   local ok, response_or_err = pcall(api.send_power, device, side, "on")
   if not ok then
     log.warn(string.format("switch_on failed for %s: %s", side, tostring(response_or_err)))
-    schedule_refresh_burst(device)
+    schedule_expedited_refresh_burst(device)
     return
   end
 
@@ -421,7 +488,7 @@ function M.switch_on(_, device)
     log.warn(string.format("switch_on returned no usable status for %s", side))
   end
 
-  schedule_refresh_burst(device)
+  schedule_expedited_refresh_burst(device)
 end
 
 function M.switch_off(_, device)
@@ -436,14 +503,14 @@ function M.switch_off(_, device)
     else
       emit_switch(device, false)
     end
-    schedule_refresh_burst(device)
+    schedule_expedited_refresh_burst(device)
     return
   end
 
   local ok, response_or_err = pcall(api.send_power, device, side, "off")
   if not ok then
     log.warn(string.format("switch_off failed for %s: %s", side, tostring(response_or_err)))
-    schedule_refresh_burst(device)
+    schedule_expedited_refresh_burst(device)
     return
   end
 
@@ -451,7 +518,7 @@ function M.switch_off(_, device)
     log.warn(string.format("switch_off returned no usable status for %s", side))
   end
 
-  schedule_refresh_burst(device)
+  schedule_expedited_refresh_burst(device)
 end
 
 function M.set_level(_, device, command)
@@ -468,7 +535,7 @@ function M.set_level(_, device, command)
   else
     apply_unit_command_response(device, response_or_err)
   end
-  schedule_refresh_burst(device)
+  schedule_expedited_refresh_burst(device)
 end
 
 function M.set_cooling_setpoint(_, device, command)
@@ -485,7 +552,7 @@ function M.set_cooling_setpoint(_, device, command)
   else
     apply_unit_command_response(device, response_or_err)
   end
-  schedule_refresh_burst(device)
+  schedule_expedited_refresh_burst(device)
 end
 
 function M.set_heating_setpoint(_, device, command)
@@ -502,7 +569,7 @@ function M.set_heating_setpoint(_, device, command)
   else
     apply_unit_command_response(device, response_or_err)
   end
-  schedule_refresh_burst(device)
+  schedule_expedited_refresh_burst(device)
 end
 
 function M.mode_off(_, device)
@@ -522,7 +589,7 @@ function M.mode_cool(_, device)
   else
     apply_unit_command_response(device, response_or_err)
   end
-  schedule_refresh_burst(device)
+  schedule_expedited_refresh_burst(device)
 end
 
 function M.mode_heat(_, device)
@@ -538,7 +605,7 @@ function M.mode_heat(_, device)
   else
     apply_unit_command_response(device, response_or_err)
   end
-  schedule_refresh_burst(device)
+  schedule_expedited_refresh_burst(device)
 end
 
 function M.set_thermostat_mode(_, device, command)
