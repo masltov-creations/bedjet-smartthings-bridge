@@ -478,7 +478,12 @@ export const createBridgeServer = (options = {}) => {
       sendJson(response, 404, { error: "Not found" });
     } catch (error) {
       logger.error("Request failed", { error: error.message });
-      const statusCode = Number.isInteger(error.status) ? error.status : 500;
+      let statusCode = Number.isInteger(error.status) ? error.status : 500;
+      if (error.name === "AbortError" || error.message === "Firmware request timed out") {
+        statusCode = 504;
+      } else if (statusCode === 500 && (error.cause || error.name === "TypeError")) {
+        statusCode = 502;
+      }
       sendJson(response, statusCode, { error: error.message });
     }
   });
