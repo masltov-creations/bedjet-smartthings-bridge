@@ -5,6 +5,7 @@ local log = require "log"
 
 local M = {}
 local LAST_KNOWN_IP_FIELD = "bedjet_last_known_bridge_ip"
+local DEFAULT_SOCKET_TIMEOUT_SECONDS = 5
 
 local function trim(value)
   return (value or ""):match("^%s*(.-)%s*$")
@@ -56,6 +57,10 @@ end
 
 local function get_bridge_port(device)
   return tonumber(device.preferences.bridgePort) or 8787
+end
+
+local function get_bridge_token(device)
+  return trim((device.preferences and device.preferences.bridgeToken) or "")
 end
 
 local function get_last_known_ip(device)
@@ -214,13 +219,17 @@ end
 
 local function request_json_using_host(host, device, method, path, body)
   local port = get_bridge_port(device)
+  local token = get_bridge_token(device)
 
   local client = assert(socket.tcp())
-  client:settimeout(3)
+  client:settimeout(DEFAULT_SOCKET_TIMEOUT_SECONDS)
   assert(client:connect(host, port))
 
   local payload = body and json.encode(body) or ""
   local request = string.format("%s %s HTTP/1.1\r\nHost: %s\r\nAccept: application/json\r\nConnection: close\r\n", method, path, host)
+  if token ~= "" then
+    request = request .. string.format("X-Bridge-Token: %s\r\n", token)
+  end
 
   if #payload > 0 then
     request = request .. string.format("Content-Type: application/json\r\nContent-Length: %d\r\n", #payload)
@@ -265,7 +274,12 @@ local function request_json_using_host(host, device, method, path, body)
     return {}
   end
 
-  local decoded = json.decode(response_body)
+  local ok_decode, decoded_or_err = pcall(json.decode, response_body)
+  if not ok_decode then
+    error("Bridge returned invalid JSON")
+  end
+
+  local decoded = decoded_or_err
   if status_code >= 400 then
     error(decoded.error or ("Bridge returned HTTP " .. tostring(status_code)))
   end

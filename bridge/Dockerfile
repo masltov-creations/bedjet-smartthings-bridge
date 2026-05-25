@@ -10,9 +10,8 @@ RUN mkdir -p /app/data
 ENV HOST=0.0.0.0
 ENV PORT=8787
 ENV DATA_PATH=/app/data/bridge.sqlite
-ENV SIMULATE_FIRMWARE=true
+ENV SIMULATE_FIRMWARE=false
 
 EXPOSE 8787
 
 CMD ["node", "src/server.mjs"]
-

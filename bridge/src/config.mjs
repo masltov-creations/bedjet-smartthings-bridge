@@ -34,11 +34,15 @@ export const config = Object.freeze({
   port: parseInteger(process.env.PORT, 8787),
   timezone: process.env.TIMEZONE || "America/Los_Angeles",
   dataPath: resolvePath(process.env.DATA_PATH, "./data/bridge.sqlite"),
+  bridgeSharedSecret: process.env.BRIDGE_SHARED_SECRET || "",
   firmwareApiBaseUrl: (process.env.FIRMWARE_API_BASE_URL || "").replace(/\/$/, ""),
   firmwareGatewayId: process.env.FIRMWARE_GATEWAY_ID || "",
   firmwareSharedSecret: process.env.FIRMWARE_SHARED_SECRET || "",
   simulateFirmware: parseBoolean(process.env.SIMULATE_FIRMWARE, false),
-  schedulerIntervalMs: parseInteger(process.env.SCHEDULER_INTERVAL_MS, 30_000)
+  schedulerIntervalMs: parseInteger(process.env.SCHEDULER_INTERVAL_MS, 30_000),
+  firmwareRequestTimeoutMs: parseInteger(process.env.FIRMWARE_REQUEST_TIMEOUT_MS, 4_000),
+  firmwareRequestRetries: parseInteger(process.env.FIRMWARE_REQUEST_RETRIES, 2),
+  gatewayStateCacheMs: parseInteger(process.env.GATEWAY_STATE_CACHE_MS, 1_000)
 });
 
 fs.mkdirSync(path.dirname(config.dataPath), { recursive: true });

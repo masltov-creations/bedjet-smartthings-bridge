@@ -10,6 +10,7 @@ Private LAN Edge driver scaffold for the BedJet bridge.
   - `Left Nightly Bio`
   - `Right Nightly Bio`
 - Talks to the bridge over local HTTP.
+- Supports optional bridge API authentication via the `Bridge Token` device preference.
 - Supports:
   - power on/off for left/right units
   - fan step via `switchLevel`

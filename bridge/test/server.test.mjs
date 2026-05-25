@@ -190,7 +190,10 @@ test("bridge validation fails in live mode without required firmware auth config
       firmwareGatewayId: "bedjet-bridge",
       firmwareSharedSecret: "",
       simulateFirmware: false,
-      schedulerIntervalMs: 30_000
+      schedulerIntervalMs: 30_000,
+      firmwareRequestTimeoutMs: 4_000,
+      firmwareRequestRetries: 2,
+      gatewayStateCacheMs: 1_000
     });
   }, /Missing required live bridge config: FIRMWARE_SHARED_SECRET/);
 });
