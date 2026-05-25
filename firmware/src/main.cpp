@@ -1102,15 +1102,20 @@ void addIndicatorConfig(JsonObject object) {
 }
 
 bool isClaimRoute() {
-  return server.uri() == "/api/v1/claim/status" || server.uri() == "/api/v1/claim";
+  if (g_currentRequest == nullptr) return false;
+  const String uri = g_currentRequest->url();
+  return uri == "/api/v1/claim/status" || uri == "/api/v1/claim";
 }
 
 bool isProvisionRoute() {
-  return server.uri() == "/" || server.uri() == "/api/v1/provision/status" || server.uri() == "/api/v1/provision/wifi";
+  if (g_currentRequest == nullptr) return false;
+  const String uri = g_currentRequest->url();
+  return uri == "/" || uri == "/api/v1/provision/status" || uri == "/api/v1/provision/wifi";
 }
 
 bool isLocalAdminRoute() {
-  return server.uri().startsWith("/api/v1/local/");
+  if (g_currentRequest == nullptr) return false;
+  return g_currentRequest->url().startsWith("/api/v1/local/");
 }
 
 bool provisioningRequiresAuth() {
@@ -1118,7 +1123,9 @@ bool provisioningRequiresAuth() {
 }
 
 bool requestRequiresAuth() {
-  if (server.uri() == "/healthz" || server.uri() == "/api/v1/version") {
+  if (g_currentRequest == nullptr) return false;
+  const String uri = g_currentRequest->url();
+  if (uri == "/healthz" || uri == "/api/v1/version") {
     return false;
   }
   if (isClaimRoute()) {
@@ -1249,10 +1256,11 @@ void handleProvisionStatus(AsyncWebServerRequest *request) {
   writeJsonResponse(request, 200, doc);
 }
 
-void handleProvisionSave() {
+void handleProvisionSave(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
   JsonDocument body;
-  if (!parseJsonBody(body)) {
-    sendJsonBodyError();
+  if (!parseJsonBody(request, body)) {
+    sendJsonBodyError(request);
     return;
   }
 
@@ -1261,7 +1269,7 @@ void handleProvisionSave() {
   const String hostname = body["hostname"] | String(MDNS_HOSTNAME);
 
   if (ssid.length() < 1) {
-    server.send(400, "application/json", "{\"error\":\"ssid is required\"}");
+    request->send(400, "application/json", "{\"error\":\"ssid is required\"}");
     return;
   }
 
@@ -1276,7 +1284,7 @@ void handleProvisionSave() {
   doc["restarting"] = true;
   doc["hostname"] = wifiConfig.hostname;
   doc["ssid"] = wifiConfig.ssid;
-  writeJsonResponse(200, doc);
+  writeJsonResponse(request, 200, doc);
   scheduleRestart();
 }
 
@@ -1357,8 +1365,9 @@ String buildProvisionPage() {
   return html;
 }
 
-void handleProvisionPage() {
-  server.send(200, "text/html; charset=utf-8", buildProvisionPage());
+void handleProvisionPage(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
+  request->send(200, "text/html; charset=utf-8", buildProvisionPage());
 }
 
 String buildGatewayPage() {
@@ -1735,8 +1744,9 @@ String buildGatewayPage() {
   return html;
 }
 
-void handleGatewayPage() {
-  server.send(200, "text/html; charset=utf-8", buildGatewayPage());
+void handleGatewayPage(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
+  request->send(200, "text/html; charset=utf-8", buildGatewayPage());
 }
 
 void handleHealthz(AsyncWebServerRequest *request) {
@@ -1777,7 +1787,7 @@ void handleState(AsyncWebServerRequest *request) {
   JsonObject sides = doc["sides"].to<JsonObject>();
   addSlot(sides["left"].to<JsonObject>(), leftState.slot, leftState.status);
   addSlot(sides["right"].to<JsonObject>(), rightState.slot, rightState.status);
-  writeJsonResponse(200, doc);
+  writeJsonResponse(request, 200, doc);
 }
 
 void handleLocalStatus(AsyncWebServerRequest *request) {
@@ -1805,10 +1815,11 @@ void handleLocalStatus(AsyncWebServerRequest *request) {
   writeJsonResponse(request, 200, doc);
 }
 
-void handleLocalSettings() {
+void handleLocalSettings(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
   JsonDocument body;
-  if (!parseJsonBody(body)) {
-    sendJsonBodyError();
+  if (!parseJsonBody(request, body)) {
+    sendJsonBodyError(request);
     return;
   }
 
@@ -1817,7 +1828,7 @@ void handleLocalSettings() {
   if (!requestedPollInterval.isNull()) {
     const int configuredPollInterval = requestedPollInterval.as<int>();
     if (configuredPollInterval <= 0) {
-      server.send(400, "application/json", "{\"error\":\"pollIntervalSeconds must be an integer\"}");
+      request->send(400, "application/json", "{\"error\":\"pollIntervalSeconds must be an integer\"}");
       return;
     }
     smartthingsPollIntervalSeconds = clampSmartThingsPollIntervalSeconds(configuredPollInterval);
@@ -1838,7 +1849,7 @@ void handleLocalSettings() {
   }
 
   if (!changed) {
-    server.send(400, "application/json", "{\"error\":\"pollIntervalSeconds or activityLightEnabled is required\"}");
+    request->send(400, "application/json", "{\"error\":\"pollIntervalSeconds or activityLightEnabled is required\"}");
     return;
   }
 
@@ -1848,10 +1859,11 @@ void handleLocalSettings() {
   addSmartThingsConfig(smartthings);
   JsonObject indicators = response["indicators"].to<JsonObject>();
   addIndicatorConfig(indicators);
-  writeJsonResponse(200, response);
+  writeJsonResponse(request, 200, response);
 }
 
-void handleScan() {
+void handleScan(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
   JsonDocument doc;
   JsonArray devices = doc["devices"].to<JsonArray>();
   for (const ScanCandidate &candidate : performBedJetScan()) {
@@ -1860,11 +1872,14 @@ void handleScan() {
     device["displayName"] = candidate.displayName;
     device["rssi"] = candidate.rssi;
   }
-  writeJsonResponse(200, doc);
+  writeJsonResponse(request, 200, doc);
 }
 
 bool parseSideFromUri(String &side, const String &prefix, const String &alternatePrefix = "") {
-  const String uri = server.uri();
+  if (g_currentRequest == nullptr) {
+    return false;
+  }
+  const String uri = g_currentRequest->url();
   if (uri.startsWith(prefix)) {
     side = uri.substring(prefix.length());
     return side == "left" || side == "right";
@@ -1876,16 +1891,17 @@ bool parseSideFromUri(String &side, const String &prefix, const String &alternat
   return false;
 }
 
-void handlePair() {
+void handlePair(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
   String side;
   if (!parseSideFromUri(side, "/api/v1/pair/", "/api/v1/local/pair/")) {
-    server.send(404, "application/json", "{\"error\":\"invalid side\"}");
+    request->send(404, "application/json", "{\"error\":\"invalid side\"}");
     return;
   }
 
   JsonDocument body;
-  if (!parseJsonBody(body)) {
-    sendJsonBodyError();
+  if (!parseJsonBody(request, body)) {
+    sendJsonBodyError(request);
     return;
   }
 
@@ -1895,7 +1911,7 @@ void handlePair() {
   state.slot.deviceId = body["deviceId"] | "";
   state.slot.displayName = body["displayName"] | "";
   if (state.slot.deviceId.length() == 0) {
-    server.send(400, "application/json", "{\"error\":\"deviceId is required\"}");
+    request->send(400, "application/json", "{\"error\":\"deviceId is required\"}");
     return;
   }
   if (state.slot.displayName.length() == 0) {
@@ -1913,13 +1929,14 @@ void handlePair() {
   pairing["deviceId"] = state.slot.deviceId;
   pairing["displayName"] = state.slot.displayName;
   pairing["pairedAt"] = state.slot.pairedAt;
-  writeJsonResponse(200, response);
+  writeJsonResponse(request, 200, response);
 }
 
-void handleVerify() {
+void handleVerify(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
   String side;
   if (!parseSideFromUri(side, "/api/v1/verify/", "/api/v1/local/verify/")) {
-    server.send(404, "application/json", "{\"error\":\"invalid side\"}");
+    request->send(404, "application/json", "{\"error\":\"invalid side\"}");
     return;
   }
 
@@ -1927,7 +1944,7 @@ void handleVerify() {
   if (state.slot.paired && !useSimulatedBackend()) {
     String error;
     if (!ensureBleClientConnected(state.slot.deviceId, error)) {
-      server.send(503, "application/json", String("{\"error\":\"") + error + "\"}");
+      request->send(503, "application/json", String("{\"error\":\"") + error + "\"}");
       return;
     }
     if (activeNameChar != nullptr && activeNameChar->canRead()) {
@@ -1961,13 +1978,14 @@ void handleVerify() {
   if (state.slot.paired) {
     signalActivityLight(makeRgbColor(0, 220, 96), 520);
   }
-  writeJsonResponse(200, response);
+  writeJsonResponse(request, 200, response);
 }
 
-void handleForget() {
+void handleForget(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
   String side;
   if (!parseSideFromUri(side, "/api/v1/forget/", "/api/v1/local/forget/")) {
-    server.send(404, "application/json", "{\"error\":\"invalid side\"}");
+    request->send(404, "application/json", "{\"error\":\"invalid side\"}");
     return;
   }
 
@@ -1981,13 +1999,14 @@ void handleForget() {
   JsonDocument response;
   response["ok"] = true;
   response["side"] = side;
-  writeJsonResponse(200, response);
+  writeJsonResponse(request, 200, response);
 }
 
-void handleRelease() {
+void handleRelease(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
   String side;
   if (!parseSideFromUri(side, "/api/v1/release/", "/api/v1/local/release/")) {
-    server.send(404, "application/json", "{\"error\":\"invalid side\"}");
+    request->send(404, "application/json", "{\"error\":\"invalid side\"}");
     return;
   }
 
@@ -2002,10 +2021,11 @@ void handleRelease() {
   response["ok"] = true;
   response["side"] = side;
   response["bleReleased"] = true;
-  writeJsonResponse(200, response);
+  writeJsonResponse(request, 200, response);
 }
 
-void handleReleaseAll() {
+void handleReleaseAll(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
   leftState.status.bleReleased = true;
   rightState.status.bleReleased = true;
   if (!useSimulatedBackend()) {
@@ -2015,26 +2035,27 @@ void handleReleaseAll() {
 
   JsonDocument response;
   response["ok"] = true;
-  writeJsonResponse(200, response);
+  writeJsonResponse(request, 200, response);
 }
 
-void handleCommand() {
+void handleCommand(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
   String side;
   if (!parseSideFromUri(side, "/api/v1/command/", "/api/v1/local/command/")) {
-    server.send(404, "application/json", "{\"error\":\"invalid side\"}");
+    request->send(404, "application/json", "{\"error\":\"invalid side\"}");
     return;
   }
 
   SideState &state = sideState(side);
   const SideStatus before = state.status;
   if (!state.slot.paired) {
-    server.send(409, "application/json", "{\"error\":\"side not paired\"}");
+    request->send(409, "application/json", "{\"error\":\"side not paired\"}");
     return;
   }
 
   JsonDocument body;
-  if (!parseJsonBody(body)) {
-    sendJsonBodyError();
+  if (!parseJsonBody(request, body)) {
+    sendJsonBodyError(request);
     return;
   }
 
@@ -2098,36 +2119,36 @@ void handleCommand() {
       status["beepMuted"] = state.status.beepsMuted;
     }
     status["bleReleased"] = state.status.bleReleased;
-    writeJsonResponse(200, response);
+    writeJsonResponse(request, 200, response);
     return;
   }
 
   if (!useSimulatedBackend()) {
     String error;
     if (!applyModeOrPower(state, effectiveBody, error)) {
-      server.send(503, "application/json", String("{\"error\":\"") + error + "\"}");
+      request->send(503, "application/json", String("{\"error\":\"") + error + "\"}");
       return;
     }
     if (effectiveBody["fanStep"].is<int>() &&
         !sendBedJetFan(state.slot.deviceId, effectiveBody["fanStep"].as<int>(), error)) {
-      server.send(503, "application/json", String("{\"error\":\"") + error + "\"}");
+      request->send(503, "application/json", String("{\"error\":\"") + error + "\"}");
       return;
     }
     if (effectiveBody["targetTemperatureC"].is<int>() &&
         !sendBedJetTemperature(state.slot.deviceId, effectiveBody["targetTemperatureC"].as<int>(), error)) {
-      server.send(503, "application/json", String("{\"error\":\"") + error + "\"}");
+      request->send(503, "application/json", String("{\"error\":\"") + error + "\"}");
       return;
     }
     if (effectiveBody["beepMuted"].is<bool>()) {
       const uint8_t button = effectiveBody["beepMuted"].as<bool>() ? BTN_MUTE : BTN_UNMUTE;
       if (!sendBedJetButton(state.slot.deviceId, button, error)) {
-        server.send(503, "application/json", String("{\"error\":\"") + error + "\"}");
+        request->send(503, "application/json", String("{\"error\":\"") + error + "\"}");
         return;
       }
     }
 
     if (!confirmCommandApplied(state, effectiveBody, desired, error)) {
-      server.send(504, "application/json", String("{\"error\":\"") + error + "\"}");
+      request->send(504, "application/json", String("{\"error\":\"") + error + "\"}");
       return;
     }
   } else {
@@ -2151,7 +2172,7 @@ void handleCommand() {
     status["beepMuted"] = state.status.beepsMuted;
   }
   status["bleReleased"] = state.status.bleReleased;
-  writeJsonResponse(200, response);
+  writeJsonResponse(request, 200, response);
 }
 
 void resetOtaUpdateState() {
@@ -2161,10 +2182,11 @@ void resetOtaUpdateState() {
   otaUpdateState = OtaUpdateState{};
 }
 
-void handleFirmwareUploadChunk() {
-  HTTPUpload &upload = server.upload();
-  switch (upload.status) {
-    case UPLOAD_FILE_START: {
+void handleFirmwareUploadChunk(AsyncWebServerRequest *request, const String &filename, size_t index, uint8_t *data, size_t len, bool final) {
+  g_currentRequest = request;
+  
+  // On first chunk (index == 0), initialize the upload state
+  if (index == 0) {
       resetOtaUpdateState();
       otaUpdateState.active = true;
 
@@ -2173,12 +2195,12 @@ void handleFirmwareUploadChunk() {
         return;
       }
 
-      if (!server.hasHeader("X-Firmware-SHA256")) {
+      if (!request->hasHeader("X-Firmware-SHA256")) {
         otaUpdateState.error = "missing X-Firmware-SHA256 header";
         return;
       }
 
-      const String expectedHash = server.header("X-Firmware-SHA256");
+      const String expectedHash = request->header("X-Firmware-SHA256");
       if (!parseSha256Hex(expectedHash, otaUpdateState.expectedSha256)) {
         otaUpdateState.error = "invalid X-Firmware-SHA256 format";
         return;
@@ -2189,29 +2211,28 @@ void handleFirmwareUploadChunk() {
         return;
       }
 
-      otaUpdateState.expectedSize = upload.totalSize;
+      otaUpdateState.expectedSize = 0;
       otaUpdateState.started = true;
       mbedtls_sha256_init(&otaUpdateState.shaCtx);
       mbedtls_sha256_starts_ret(&otaUpdateState.shaCtx, 0);
-      break;
-    }
-    case UPLOAD_FILE_WRITE: {
-      if (!otaUpdateState.active || !otaUpdateState.started || otaUpdateState.error.length() > 0) {
+  }
+  
+  // Handle chunk data
+  if (len > 0) {
+    if (!otaUpdateState.active || !otaUpdateState.started || otaUpdateState.error.length() > 0) {
         return;
       }
-      if (upload.currentSize == 0) {
+    mbedtls_sha256_update_ret(&otaUpdateState.shaCtx, data, len);
+    if (Update.write(data, len) != len) {
+      otaUpdateState.error = String("firmware write failed: ") + Update.errorString();
         return;
       }
-      mbedtls_sha256_update_ret(&otaUpdateState.shaCtx, upload.buf, upload.currentSize);
-      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-        otaUpdateState.error = String("firmware write failed: ") + Update.errorString();
-        return;
-      }
-      otaUpdateState.receivedSize += upload.currentSize;
-      break;
-    }
-    case UPLOAD_FILE_END: {
-      if (!otaUpdateState.active || !otaUpdateState.started || otaUpdateState.error.length() > 0) {
+    otaUpdateState.receivedSize += len;
+  }
+  
+  // On final chunk, finalize the update
+  if (final) {
+    if (!otaUpdateState.active || !otaUpdateState.started || otaUpdateState.error.length() > 0) {
         return;
       }
 
@@ -2234,27 +2255,17 @@ void handleFirmwareUploadChunk() {
 
       otaUpdateState.completed = true;
       otaUpdateState.ok = true;
-      break;
-    }
-    case UPLOAD_FILE_ABORTED: {
-      if (otaUpdateState.active && otaUpdateState.started) {
-        Update.abort();
-      }
-      otaUpdateState.error = "firmware upload aborted";
-      break;
-    }
-    default:
-      break;
   }
 }
 
-void handleFirmwareUpdate() {
+void handleFirmwareUpdate(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
   JsonDocument response;
   response["ok"] = false;
 
   if (!otaUpdateState.active) {
     response["error"] = "no upload session";
-    writeJsonResponse(400, response);
+    writeJsonResponse(request, 400, response);
     return;
   }
 
@@ -2265,7 +2276,7 @@ void handleFirmwareUpdate() {
     otaPersistState.lastAttemptAt = String(millis());
     saveOtaPersistState();
     resetOtaUpdateState();
-    writeJsonResponse(400, response);
+    writeJsonResponse(request, 400, response);
     return;
   }
 
@@ -2276,7 +2287,7 @@ void handleFirmwareUpdate() {
     otaPersistState.lastAttemptAt = String(millis());
     saveOtaPersistState();
     resetOtaUpdateState();
-    writeJsonResponse(400, response);
+    writeJsonResponse(request, 400, response);
     return;
   }
 
@@ -2292,20 +2303,21 @@ void handleFirmwareUpdate() {
   saveOtaPersistState();
   resetOtaUpdateState();
   scheduleRestart();
-  writeJsonResponse(200, response);
+  writeJsonResponse(request, 200, response);
 }
 
-void handleFirmwareRollback() {
+void handleFirmwareRollback(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
   JsonDocument response;
   response["ok"] = false;
   if (!Update.canRollBack()) {
     response["error"] = "rollback image unavailable";
-    writeJsonResponse(409, response);
+    writeJsonResponse(request, 409, response);
     return;
   }
   if (!Update.rollBack()) {
     response["error"] = "rollback failed";
-    writeJsonResponse(500, response);
+    writeJsonResponse(request, 500, response);
     return;
   }
   response["ok"] = true;
@@ -2316,7 +2328,7 @@ void handleFirmwareRollback() {
   otaPersistState.lastAttemptAt = String(millis());
   saveOtaPersistState();
   scheduleRestart();
-  writeJsonResponse(200, response);
+  writeJsonResponse(request, 200, response);
 }
 
 void connectWiFi() {
@@ -2366,21 +2378,23 @@ void startMdns() {
 }
 
 void registerRoutes() {
-  server.on("/", HTTP_GET, []() {
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    g_currentRequest = request;
     if (isStationConnected()) {
-      handleGatewayPage();
+      handleGatewayPage(request);
       return;
     }
-    handleProvisionPage();
+    handleProvisionPage(request);
   });
   server.on("/healthz", HTTP_GET, handleHealthz);
   server.on("/api/v1/version", HTTP_GET, handleVersion);
   server.on("/api/v1/provision/status", HTTP_GET, handleProvisionStatus);
-  server.on("/api/v1/provision/wifi", HTTP_POST, []() {
+  server.on("/api/v1/provision/wifi", HTTP_POST, [](AsyncWebServerRequest *request) {
+    g_currentRequest = request;
     if (provisioningRequiresAuth() && !verifyRequestAuth()) {
       return;
     }
-    handleProvisionSave();
+    handleProvisionSave(request);
   });
   server.on("/api/v1/claim/status", HTTP_GET, handleClaimStatus);
   server.on("/api/v1/claim", HTTP_POST, handleClaim);
@@ -2388,63 +2402,74 @@ void registerRoutes() {
   server.on("/api/v1/local/scan", HTTP_GET, handleScan);
   server.on("/api/v1/local/settings", HTTP_POST, handleLocalSettings);
   server.on("/api/v1/local/release-all", HTTP_POST, handleReleaseAll);
-  server.on("/api/v1/state", HTTP_GET, []() {
+  server.on("/api/v1/state", HTTP_GET, [](AsyncWebServerRequest *request) {
+    g_currentRequest = request;
     if (!verifyRequestAuth()) {
       return;
     }
-    handleState();
+    handleState(request);
   });
-  server.on("/api/v1/scan", HTTP_GET, []() {
+  server.on("/api/v1/scan", HTTP_GET, [](AsyncWebServerRequest *request) {
+    g_currentRequest = request;
     if (!verifyRequestAuth()) {
       return;
     }
-    handleScan();
+    handleScan(request);
   });
-  server.on("/api/v1/release-all", HTTP_POST, []() {
+  server.on("/api/v1/release-all", HTTP_POST, [](AsyncWebServerRequest *request) {
+    g_currentRequest = request;
     if (!verifyRequestAuth()) {
       return;
     }
-    handleReleaseAll();
+    handleReleaseAll(request);
   });
-  server.on("/api/v1/firmware/update", HTTP_POST, handleFirmwareUpdate, handleFirmwareUploadChunk);
-  server.on("/api/v1/firmware/rollback", HTTP_POST, []() {
+  server.on("/api/v1/firmware/update", HTTP_POST, [](AsyncWebServerRequest *request) {
+    g_currentRequest = request;
+    handleFirmwareUpdate(request);
+  }, [](AsyncWebServerRequest *request, const String &filename, size_t index, uint8_t *data, size_t len, bool final) {
+    g_currentRequest = request;
+    handleFirmwareUploadChunk(request, filename, index, data, len, final);
+  });
+  server.on("/api/v1/firmware/rollback", HTTP_POST, [](AsyncWebServerRequest *request) {
+    g_currentRequest = request;
     if (!verifyRequestAuth()) {
       return;
     }
-    handleFirmwareRollback();
+    handleFirmwareRollback(request);
   });
-  server.onNotFound([]() {
-    const String uri = server.uri();
+  server.onNotFound([](AsyncWebServerRequest *request) {
+    g_currentRequest = request;
+    const String uri = request->url();
     if (requestRequiresAuth() && !verifyRequestAuth()) {
       return;
     }
-    if (server.method() == HTTP_POST &&
+    if (request->method() == HTTP_POST &&
         (uri.startsWith("/api/v1/pair/") || uri.startsWith("/api/v1/local/pair/"))) {
-      handlePair();
+      handlePair(request);
       return;
     }
-    if (server.method() == HTTP_POST &&
+    if (request->method() == HTTP_POST &&
         (uri.startsWith("/api/v1/verify/") || uri.startsWith("/api/v1/local/verify/"))) {
-      handleVerify();
+      handleVerify(request);
       return;
     }
-    if (server.method() == HTTP_POST &&
+    if (request->method() == HTTP_POST &&
         (uri.startsWith("/api/v1/forget/") || uri.startsWith("/api/v1/local/forget/"))) {
-      handleForget();
+      handleForget(request);
       return;
     }
-    if (server.method() == HTTP_POST &&
+    if (request->method() == HTTP_POST &&
         (uri.startsWith("/api/v1/release/") || uri.startsWith("/api/v1/local/release/"))) {
-      handleRelease();
+      handleRelease(request);
       return;
     }
-    if (server.method() == HTTP_POST &&
+    if (request->method() == HTTP_POST &&
         (uri.startsWith("/api/v1/command/") || uri.startsWith("/api/v1/local/command/"))) {
-      handleCommand();
+      handleCommand(request);
       return;
     }
 
-    server.send(404, "application/json", "{\"error\":\"not found\"}");
+    request->send(404, "application/json", "{\"error\":\"not found\"}");
   });
 }
 
