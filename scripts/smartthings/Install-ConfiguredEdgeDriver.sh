@@ -156,7 +156,7 @@ import re, sys
 path, host, port, fallback_ip = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 text = open(path, "r", encoding="utf-8").read()
 text = re.sub(
-    r"(?m)^(\s*default:\s*)bedjet-bridge\.local\s*$",
+  r"(?m)^(\s*default:\s*)(?:bedjet-bridge\.local|bridge-host-or-ip)\s*$",
     lambda m: m.group(1) + host,
     text,
 )

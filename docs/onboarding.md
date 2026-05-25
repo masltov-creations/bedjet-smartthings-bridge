@@ -13,6 +13,17 @@
 9. Verify both pairings.
 10. Install the SmartThings Edge driver and point it at the bridge LAN URL.
 11. Pin the devices or Nightly Bio launchers in the SmartThings app favorites.
+12. Run a real hop-by-hop E2E test on both sides:
+	- Trigger `ON` from SmartThings.
+	- Confirm bridge command log shows `power=on` for the correct side.
+	- Confirm bridge/gateway verify readback reports `power=on`.
+	- Confirm the physical BedJet is on.
+	- Confirm SmartThings refresh shows `ON`.
+	- Trigger `OFF` from SmartThings.
+	- Confirm bridge command log shows `power=off` for the correct side.
+	- Confirm bridge/gateway verify readback reports `power=off`.
+	- Confirm the physical BedJet is off.
+	- Confirm SmartThings refresh shows `OFF`.
 
 ## Why Pair One Side At A Time
 

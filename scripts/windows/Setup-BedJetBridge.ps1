@@ -43,6 +43,7 @@ $script:ResolvedGatewayRemoteBaseUrl = ''
 $script:ResolvedGatewayId = ''
 $script:ResolvedGatewaySharedSecret = ''
 $script:ResolvedBridgeLanUrl = ''
+$script:ResolvedBridgeBindAddress = '0.0.0.0'
 $script:ResolvedSmartThingsBridgeHost = ''
 $script:ResolvedSmartThingsBridgeFallbackIp = ''
 $script:ResolvedSshTarget = ''
@@ -629,7 +630,7 @@ function Resolve-SmartThingsBridgeHost {
         [void]$hostnameCandidates.Add([string]$RemoteFacts['host_fqdn'])
         $short = ([string]$RemoteFacts['host_fqdn']).Split('.')[0]
         if ($short) {
-            [void]$hostnameCandidates.Add("$short.local")
+            [void]$hostnameCandidates.Add($short)
         }
     }
 
@@ -657,7 +658,7 @@ function Resolve-SmartThingsBridgeHost {
 
     foreach ($candidate in $dedupedHostnames) {
         $health = Invoke-JsonRequest -Method 'GET' -Uri "http://$candidate`:$Port/healthz" -AllowFailure
-        if ($health -and $health.ok) {
+        if ($health -and $health.ok -and $health.service -eq 'bedjet-bridge') {
             return @{
                 Host = $candidate
                 FallbackIp = if ($dedupedFallbackIps.Count -gt 0) { [string]$dedupedFallbackIps[0] } else { '' }
@@ -782,6 +783,8 @@ function Write-BridgeEnvFile {
     $content = @(
         'HOST=0.0.0.0'
         "PORT=$BridgePort"
+        "BRIDGE_PORT=$BridgePort"
+        "BRIDGE_BIND_ADDRESS=$script:ResolvedBridgeBindAddress"
         'TIMEZONE=America/Los_Angeles'
         'DATA_PATH=/app/data/bridge.sqlite'
         "FIRMWARE_API_BASE_URL=$script:ResolvedGatewayRemoteBaseUrl"
@@ -857,7 +860,7 @@ function Test-RemoteBridgeHealth {
         [int]$Port
     )
 
-    [void](Wait-RemoteHttpGet -Target $Target -Url "http://127.0.0.1:$Port/healthz")
+    [void](Wait-RemoteHttpGet -Target $Target -Url "$script:ResolvedBridgeLanUrl/healthz")
 }
 
 function Test-RemoteBridgeGatewayIntegration {
@@ -869,7 +872,7 @@ function Test-RemoteBridgeGatewayIntegration {
         [int]$Port
     )
 
-    $result = Wait-RemoteHttpGet -Target $Target -Url "http://127.0.0.1:$Port/v1/system"
+    $result = Wait-RemoteHttpGet -Target $Target -Url "$script:ResolvedBridgeLanUrl/v1/system"
 
     $snapshot = $result.Output | ConvertFrom-Json
     if (-not $snapshot.gatewayClaim.claimed) {
@@ -937,6 +940,7 @@ if (-not $SkipRemote) {
         throw 'docker compose is not available on the remote host.'
     }
     $script:ResolvedBridgeLanUrl = "http://$($remoteFacts['lan_ip']):$BridgePort"
+    $script:ResolvedBridgeBindAddress = [string]$remoteFacts['lan_ip']
     $savedSmartThingsHost = if ($state.Contains('smartThingsBridgeHost')) { [string]$state['smartThingsBridgeHost'] } else { '' }
     $savedFallbackIp = if ($state.Contains('smartThingsBridgeFallbackIp')) { [string]$state['smartThingsBridgeFallbackIp'] } else { '' }
     $sshAlias = Get-SshHostAlias -Target $script:ResolvedSshTarget
@@ -944,7 +948,7 @@ if (-not $SkipRemote) {
     if ($savedSmartThingsHost -and -not (Test-Ipv4Address -Value $savedSmartThingsHost)) {
         $preferredHostname = $savedSmartThingsHost
     } elseif ($sshAlias) {
-        $preferredHostname = if ($sshAlias.Contains('.')) { $sshAlias } else { "$sshAlias.local" }
+        $preferredHostname = $sshAlias
     }
     $smartThingsBridge = Resolve-SmartThingsBridgeHost -RemoteFacts $remoteFacts -Port $BridgePort -PreferredHostname $preferredHostname -LastKnownIp $savedFallbackIp
     $script:ResolvedSmartThingsBridgeHost = $smartThingsBridge.Host
@@ -962,6 +966,7 @@ if (-not $SkipRemote) {
     }
     Write-Ok 'Remote Docker looks healthy'
 } else {
+    $script:ResolvedBridgeBindAddress = '127.0.0.1'
     $script:ResolvedSmartThingsBridgeHost = '127.0.0.1'
     $script:ResolvedSmartThingsBridgeFallbackIp = '127.0.0.1'
 }

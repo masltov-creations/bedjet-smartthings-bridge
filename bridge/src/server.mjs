@@ -69,16 +69,81 @@ const assertSide = (side) => {
   }
 };
 
-const normalizeGatewayPairing = (side, gatewaySideState) => {
-  if (!gatewaySideState?.paired || !gatewaySideState.deviceId) {
+const validateCommandBody = (body) => {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new HttpError(400, "Command body must be a JSON object");
+  }
+
+  const hasPower = Object.hasOwn(body, "power");
+  const hasMode = Object.hasOwn(body, "mode");
+  const hasFanStep = Object.hasOwn(body, "fanStep");
+  const hasTargetTemperatureC = Object.hasOwn(body, "targetTemperatureC");
+  const hasBeepMuted = Object.hasOwn(body, "beepMuted");
+  if (!hasPower && !hasMode && !hasFanStep && !hasTargetTemperatureC && !hasBeepMuted) {
+    throw new HttpError(400, "Command body must include at least one of: power, mode, fanStep, targetTemperatureC, beepMuted");
+  }
+
+  if (hasPower && !["on", "off"].includes(body.power)) {
+    throw new HttpError(400, "power must be 'on' or 'off'");
+  }
+
+  if (hasMode && !["off", "cool", "heat", "dry", "turbo"].includes(body.mode)) {
+    throw new HttpError(400, "mode must be one of: off, cool, heat, dry, turbo");
+  }
+
+  if (hasFanStep && (!Number.isInteger(body.fanStep) || body.fanStep < 1 || body.fanStep > 20)) {
+    throw new HttpError(400, "fanStep must be an integer between 1 and 20");
+  }
+
+  if (
+    hasTargetTemperatureC
+    && (!Number.isInteger(body.targetTemperatureC) || body.targetTemperatureC < 15 || body.targetTemperatureC > 40)
+  ) {
+    throw new HttpError(400, "targetTemperatureC must be an integer between 15 and 40");
+  }
+
+  if (hasBeepMuted && typeof body.beepMuted !== "boolean") {
+    throw new HttpError(400, "beepMuted must be true or false");
+  }
+};
+
+const extractGatewayPairing = (side, gatewaySideState) => {
+  if (!gatewaySideState) {
+    return null;
+  }
+
+  if (gatewaySideState.paired && typeof gatewaySideState.paired === "object") {
+    return {
+      side,
+      deviceId: gatewaySideState.paired.deviceId,
+      displayName: gatewaySideState.paired.displayName,
+      pairedAt: gatewaySideState.paired.pairedAt || null
+    };
+  }
+
+  if (!gatewaySideState.paired || !gatewaySideState.deviceId) {
     return null;
   }
 
   return {
     side,
     deviceId: gatewaySideState.deviceId,
-    displayName: gatewaySideState.displayName || `BedJet ${side}`,
+    displayName: gatewaySideState.displayName,
     pairedAt: gatewaySideState.pairedAt || null
+  };
+};
+
+const normalizeGatewayPairing = (side, gatewaySideState) => {
+  const pairing = extractGatewayPairing(side, gatewaySideState);
+  if (!pairing?.deviceId) {
+    return null;
+  }
+
+  return {
+    side,
+    deviceId: pairing.deviceId,
+    displayName: pairing.displayName || `BedJet ${side}`,
+    pairedAt: pairing.pairedAt || null
   };
 };
 
@@ -423,6 +488,7 @@ export const createBridgeServer = (options = {}) => {
 
         if (action === "command") {
           const body = await parseBody(request);
+          validateCommandBody(body);
           const result = await firmware.sendCommand(side, body, firmwareOptions);
           store.logCommand(side, "manual-command", body, result, true);
           invalidateGatewayStateCache();

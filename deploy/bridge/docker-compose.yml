@@ -7,7 +7,9 @@ services:
     env_file:
       - bridge.env
     ports:
-      - "${BRIDGE_PORT:-8787}:8787"
+      - target: 8787
+        published: "${BRIDGE_PORT:-8787}"
+        host_ip: "${BRIDGE_BIND_ADDRESS:-0.0.0.0}"
     volumes:
       - ../../bridge-data:/app/data
     healthcheck:

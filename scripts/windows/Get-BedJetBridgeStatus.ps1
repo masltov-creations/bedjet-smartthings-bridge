@@ -50,6 +50,22 @@ function Resolve-SshTarget {
     return $candidate
 }
 
+function Resolve-BridgeStatusUrl {
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$State,
+
+        [Parameter(Mandatory)]
+        [int]$Port
+    )
+
+    if ($State.Contains('bridgeLanUrl') -and $State['bridgeLanUrl']) {
+        return ([string]$State['bridgeLanUrl']).TrimEnd('/')
+    }
+
+    return "http://127.0.0.1:$Port"
+}
+
 function Get-NativeCommand {
     param(
         [Parameter(Mandatory)]
@@ -99,11 +115,14 @@ function Invoke-CommandShell {
 
 $state = Get-SetupState
 $resolvedSshTarget = Resolve-SshTarget -ProvidedTarget $SshTarget -State $state
+$bridgeStatusUrl = Resolve-BridgeStatusUrl -State $state -Port $BridgePort
 $ssh = Get-NativeCommand -Name 'ssh'
+$escapedBridgeStatusUrl = $bridgeStatusUrl.Replace("'", "'""'""'")
 $remoteScript = @'
 set -e
-curl -fsS http://127.0.0.1:'@ + $BridgePort + @'/v1/system
+curl -fsS '__BRIDGE_STATUS_URL__/v1/system'
 '@
+$remoteScript = $remoteScript.Replace('__BRIDGE_STATUS_URL__', $escapedBridgeStatusUrl)
 
 $escapedRemoteScript = $remoteScript.Replace('"', '\"').Replace("`r", '').Replace("`n", '; ')
 $commandLine = '"' + $ssh + '" -o BatchMode=yes -o ConnectTimeout=8 ' + $resolvedSshTarget + ' "bash -lc ""' + $escapedRemoteScript + '"""'
@@ -113,6 +132,7 @@ $system = $output | ConvertFrom-Json
 
 $status = [ordered]@{
     bridge_ok = $true
+    bridge_status_url = $bridgeStatusUrl
     bridge_port = $system.bridge.port
     bridge_host = $system.bridge.host
     bridge_gateway_url = $system.bridge.firmwareApiBaseUrl

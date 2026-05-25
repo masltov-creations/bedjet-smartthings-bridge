@@ -375,16 +375,83 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Setup-BedJetBridge.ps
 - SmartThings:
   - SmartThings CLI
 
-## Verification Checklist
+## Real E2E Acceptance (Required)
+
+### E2E Means This (Definition)
+
+The system is only considered end-to-end working when a command travels through the full chain and results in an observed state change that is read back correctly:
+
+`SmartThings -> Edge Driver -> Bridge -> Gateway -> BedJet -> Gateway Readback -> Bridge API -> SmartThings`
+
+If any hop is skipped, this is not E2E.
+
+### Pre-Checks
 
 1. `ssh -o BatchMode=yes <ssh-target> 'printf ok'` succeeds.
 2. `<gateway-url>/healthz` returns healthy response.
 3. Docker reports `bedjet-bridge` health as `healthy`.
-4. Bridge `/healthz` passes on remote host.
-5. Bridge `/v1/system` reports claimed gateway.
-6. Left and right BedJet pairings both verify.
-7. SmartThings on/off control succeeds for both sides with true state feedback.
-8. SmartThings app state matches what the BedJet actually did, not just what we hoped it did.
+4. Bridge `/healthz` and `/readyz` pass on remote host.
+5. Bridge `/v1/system` reports claimed gateway and both pairings present.
+
+### Required Transition Tests (No No-Op Commands)
+
+Run these tests for both `left` and `right`:
+
+1. Read current side state via `POST /v1/bedjets/<side>/verify`.
+2. Send the opposite power state via `POST /v1/bedjets/<side>/command`.
+3. Read back via `POST /v1/bedjets/<side>/verify` and confirm power changed to the target.
+4. Restore original state via `POST /v1/bedjets/<side>/command`.
+5. Read back again and confirm state is restored.
+
+Pass condition for each side:
+
+- command response `ok=true` and `confirmed=true`
+- verify readback matches requested transition
+- physical BedJet behavior matches the transition
+
+### SmartThings Required Validation
+
+Run the same transition pattern from SmartThings for both sides. This is required for true end-to-end acceptance.
+
+#### Required ON Path Verification
+
+For each side:
+
+1. Trigger `ON` from SmartThings app or SmartThings CLI.
+2. Confirm the command appears at the bridge hop:
+  - bridge recent command log shows the expected side and `power=on`
+3. Confirm the gateway/bridge readback hop:
+  - `POST /v1/bedjets/<side>/verify` reports `power=on`
+4. Confirm the physical device hop:
+  - the real BedJet turns on
+5. Confirm the SmartThings state hop:
+  - SmartThings refresh shows `ON`
+
+#### Required OFF Path Verification
+
+For each side:
+
+1. Trigger `OFF` from SmartThings app or SmartThings CLI.
+2. Confirm the command appears at the bridge hop:
+  - bridge recent command log shows the expected side and `power=off`
+3. Confirm the gateway/bridge readback hop:
+  - `POST /v1/bedjets/<side>/verify` reports `power=off`
+4. Confirm the physical device hop:
+  - the real BedJet turns off
+5. Confirm the SmartThings state hop:
+  - SmartThings refresh shows `OFF`
+
+If any one of these observations is missing, the system is not verified end to end.
+
+### Not Accepted As E2E
+
+- Sending a command that keeps the same state (no-op).
+- Checking only `/healthz` or container health.
+- Verifying only one side.
+- Accepting SmartThings UI state without bridge/gateway readback.
+- Fire-and-forget control without transition confirmation.
+- Stopping after bridge/gateway verification without proving the SmartThings hop.
+- Treating command submission as success when ON was not observed and confirmed, and OFF was not observed and confirmed.
 
 ## Local Validation
 

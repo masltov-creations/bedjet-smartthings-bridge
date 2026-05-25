@@ -16,7 +16,10 @@ const defaultConfig = Object.freeze({
 });
 
 const defaultSideState = () => ({
-  paired: null,
+  paired: false,
+  deviceId: "",
+  displayName: "",
+  pairedAt: "",
   status: {
     power: "off",
     mode: "cool",
@@ -68,6 +71,19 @@ const parseBody = async (request) => {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString("utf8");
+};
+
+const buildPairing = (sideState, side) => {
+  if (!sideState?.paired || !sideState.deviceId) {
+    return null;
+  }
+
+  return {
+    side,
+    deviceId: sideState.deviceId,
+    displayName: sideState.displayName,
+    pairedAt: sideState.pairedAt || null
+  };
 };
 
 export const createMockGatewayServer = (options = {}) => {
@@ -219,14 +235,12 @@ export const createMockGatewayServer = (options = {}) => {
         const sideState = state.sides[side];
 
         if (action === "pair") {
-          sideState.paired = {
-            side,
-            deviceId: body.deviceId || `bedjet-3-${side}-demo`,
-            displayName: body.displayName || `BedJet 3 ${side[0].toUpperCase()}${side.slice(1)} Demo`,
-            pairedAt: new Date().toISOString()
-          };
+          sideState.paired = true;
+          sideState.deviceId = body.deviceId || `bedjet-3-${side}-demo`;
+          sideState.displayName = body.displayName || `BedJet 3 ${side[0].toUpperCase()}${side.slice(1)} Demo`;
+          sideState.pairedAt = new Date().toISOString();
           sideState.status.bleReleased = false;
-          json(response, 200, { ok: true, pairing: sideState.paired });
+          json(response, 200, { ok: true, pairing: buildPairing(sideState, side) });
           return;
         }
 
@@ -234,7 +248,7 @@ export const createMockGatewayServer = (options = {}) => {
           json(response, 200, {
             ok: Boolean(sideState.paired),
             side,
-            pairing: sideState.paired,
+            pairing: buildPairing(sideState, side),
             status: sideState.status
           });
           return;
@@ -263,7 +277,7 @@ export const createMockGatewayServer = (options = {}) => {
           bleReleased: false,
           currentTemperatureC: body.targetTemperatureC ?? sideState.status.currentTemperatureC
         };
-        json(response, 200, { ok: true, side, pairing: sideState.paired, status: sideState.status });
+        json(response, 200, { ok: true, side, pairing: buildPairing(sideState, side), status: sideState.status });
       });
       return;
     }

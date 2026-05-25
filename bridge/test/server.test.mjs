@@ -2,14 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { createBridgeServer, validateRuntimeConfig } from "../src/server.mjs";
 import { BridgeStore } from "../src/store.mjs";
 import { FirmwareClient } from "../src/firmware-client.mjs";
 import { ProfileEngine } from "../src/profile-engine.mjs";
+import { createMockGatewayServer } from "../../mock-gateway/src/server.mjs";
 
 const makeTempDb = () => {
-  const dir = fs.mkdtempSync(path.join("/tmp", "bedjet-bridge-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bedjet-bridge-"));
   return path.join(dir, "bridge.sqlite");
 };
 
@@ -371,6 +373,52 @@ test("bridge returns 502 for firmware non-JSON responses without echoing upstrea
   assert.doesNotMatch(payload.error, /sensitive-gateway-body/);
 });
 
+test("bridge rejects malformed or no-op command payloads", async (t) => {
+  const app = createBridgeServer({
+    config: {
+      host: "127.0.0.1",
+      port: 0,
+      dataPath: makeTempDb(),
+      simulateFirmware: true
+    },
+    logger
+  });
+
+  await app.start();
+  t.after(async () => {
+    await app.stop();
+  });
+
+  const { port } = app.server.address();
+
+  const emptyBodyResponse = await fetch(`http://127.0.0.1:${port}/v1/bedjets/left/command`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({})
+  });
+  assert.equal(emptyBodyResponse.status, 400);
+
+  const nullPowerResponse = await fetch(`http://127.0.0.1:${port}/v1/bedjets/left/command`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ power: null })
+  });
+  assert.equal(nullPowerResponse.status, 400);
+
+  const invalidFanResponse = await fetch(`http://127.0.0.1:${port}/v1/bedjets/left/command`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ fanStep: 0 })
+  });
+  assert.equal(invalidFanResponse.status, 400);
+});
+
 test("bridge validation fails in live mode without required firmware auth config", () => {
   assert.throws(() => {
     validateRuntimeConfig({
@@ -388,4 +436,63 @@ test("bridge validation fails in live mode without required firmware auth config
       gatewayStateCacheMs: 1_000
     });
   }, /Missing required live bridge config: FIRMWARE_SHARED_SECRET/);
+});
+
+test("bridge live mode preserves pairing readback against the gateway state endpoint", async (t) => {
+  const mockGateway = createMockGatewayServer({ host: "127.0.0.1", port: 0 });
+  await new Promise((resolve) => mockGateway.server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    await new Promise((resolve, reject) => {
+      mockGateway.server.close((error) => (error ? reject(error) : resolve()));
+    });
+  });
+
+  const mockPort = mockGateway.server.address().port;
+  const gatewayId = "bedjet-bridge";
+  const sharedSecret = "0123456789abcdef0123456789abcdef";
+  const app = createBridgeServer({
+    config: {
+      host: "127.0.0.1",
+      port: 0,
+      dataPath: makeTempDb(),
+      simulateFirmware: false,
+      firmwareApiBaseUrl: `http://127.0.0.1:${mockPort}`,
+      firmwareGatewayId: gatewayId,
+      firmwareSharedSecret: sharedSecret
+    },
+    logger
+  });
+
+  await app.firmware.claimGateway({ gatewayId, sharedSecret });
+  await app.start();
+  t.after(async () => {
+    await app.stop();
+  });
+
+  const bridgePort = app.server.address().port;
+  const pairResponse = await fetch(`http://127.0.0.1:${bridgePort}/v1/bedjets/left/pair`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      deviceId: "bedjet-3-left-demo",
+      displayName: "BedJet 3 Left Demo"
+    })
+  });
+  assert.equal(pairResponse.status, 200);
+
+  const bedjetResponse = await fetch(`http://127.0.0.1:${bridgePort}/v1/bedjets/left`);
+  assert.equal(bedjetResponse.status, 200);
+
+  const bedjet = await bedjetResponse.json();
+  assert.equal(bedjet.pairing?.deviceId, "bedjet-3-left-demo");
+  assert.equal(bedjet.gateway?.deviceId, "bedjet-3-left-demo");
+  assert.equal(bedjet.gateway?.paired, true);
+
+  const allBedjetsResponse = await fetch(`http://127.0.0.1:${bridgePort}/v1/bedjets`);
+  assert.equal(allBedjetsResponse.status, 200);
+
+  const allBedjets = await allBedjetsResponse.json();
+  assert.equal(allBedjets.pairings.left?.deviceId, "bedjet-3-left-demo");
 });

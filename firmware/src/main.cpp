@@ -1,10 +1,10 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <BLEDevice.h>
+#include <ESPAsyncWebServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <Update.h>
-#include <WebServer.h>
 #include <WiFi.h>
 #include <mbedtls/md.h>
 #include <mbedtls/sha256.h>
@@ -66,6 +66,8 @@ enum BedjetButton : uint8_t {
   BTN_TURBO = 0x4,
   BTN_DRY = 0x5,
   BTN_EXTHT = 0x6,
+  BTN_MUTE = 0x48,
+  BTN_UNMUTE = 0x49,
   MAGIC_CONNTEST = 0x42
 };
 
@@ -89,6 +91,9 @@ struct SideStatus {
   int fanStep = 8;
   int targetTemperatureC = 24;
   int currentTemperatureC = 23;
+  bool beepsMuted = false;
+  bool beepsMutedKnown = false;
+  bool autoMuted = false;
   bool bleReleased = false;
 };
 
@@ -101,6 +106,8 @@ struct ParsedBedJetStatus {
   int fanStep = 8;
   int targetTemperatureC = 24;
   int currentTemperatureC = 23;
+  bool beepsMuted = false;
+  bool beepsMutedKnown = false;
 };
 
 struct SideState {
@@ -146,7 +153,7 @@ struct ScanCandidate {
   int rssi = 0;
 };
 
-WebServer server(kHttpPort);
+AsyncWebServer server(kHttpPort);
 Preferences preferences;
 SideState leftState;
 SideState rightState;
@@ -194,6 +201,9 @@ unsigned long lastStatusNotificationAtMs = 0;
 int lastJsonBodyErrorStatus = 400;
 String lastJsonBodyError = "invalid json";
 
+// Request context for AsyncWebServer handlers
+AsyncWebServerRequest *g_currentRequest = nullptr;
+
 bool useSimulatedBackend() {
   return BEDJET_SIMULATED_BACKEND == 1;
 }
@@ -224,10 +234,10 @@ String simulatedDeviceNameForSide(const String &side) {
   return side == "left" ? "BedJet 3 Left Demo" : "BedJet 3 Right Demo";
 }
 
-void writeJsonResponse(int statusCode, JsonDocument &doc) {
+void writeJsonResponse(AsyncWebServerRequest *request, int statusCode, JsonDocument &doc) {
   String payload;
   serializeJson(doc, payload);
-  server.send(statusCode, "application/json", payload);
+  request->send(statusCode, "application/json", payload);
 }
 
 void loadSlot(PairSlot &slot, const String &side) {
@@ -498,6 +508,9 @@ void disconnectActiveBleClient() {
   lastStatusNotificationAtMs = 0;
 }
 
+SideState *stateForDeviceId(const String &deviceId);
+bool writeBedJetPacket(uint8_t *data, size_t length, String &error);
+
 bool ensureBleClientConnected(const String &deviceId, String &error) {
   if (useSimulatedBackend()) {
     return true;
@@ -540,6 +553,17 @@ bool ensureBleClientConnected(const String &deviceId, String &error) {
 
   if (activeStatusChar != nullptr && activeStatusChar->canNotify()) {
     activeStatusChar->registerForNotify(handleStatusNotify, true);
+  }
+
+  // Auto-mute beeps on first connection per session.
+  SideState *connectedState = stateForDeviceId(deviceId);
+  if (connectedState != nullptr && !connectedState->status.autoMuted) {
+    String muteError;
+    uint8_t mutePacket[] = {CMD_BUTTON, BTN_MUTE};
+    writeBedJetPacket(mutePacket, sizeof(mutePacket), muteError);
+    connectedState->status.autoMuted = true;
+    connectedState->status.beepsMuted = true;
+    connectedState->status.beepsMutedKnown = true;
   }
 
   activeBleAddress = deviceId;
@@ -735,6 +759,10 @@ bool parseBedJetStatusPacket(const std::string &raw, ParsedBedJetStatus &parsed,
   parsed.fanStep = fanStep;
   parsed.targetTemperatureC = static_cast<int>(targetTempStep) / 2;
   parsed.currentTemperatureC = static_cast<int>(ambientStep) / 2;
+  if (length > 27) {
+    parsed.beepsMuted = (data[27] & 0x01) != 0;
+    parsed.beepsMutedKnown = true;
+  }
   parsed.valid = true;
   return true;
 }
@@ -807,6 +835,10 @@ bool confirmCommandApplied(SideState &state, const JsonDocument &body, const Sid
         state.status.fanStep = observed.fanStep;
         state.status.targetTemperatureC = observed.targetTemperatureC;
         state.status.currentTemperatureC = observed.currentTemperatureC;
+        if (observed.beepsMutedKnown) {
+          state.status.beepsMuted = observed.beepsMuted;
+          state.status.beepsMutedKnown = true;
+        }
         state.status.bleReleased = false;
         return true;
       }
@@ -974,25 +1006,46 @@ SideState &sideState(const String &side) {
   return side == "left" ? leftState : rightState;
 }
 
-bool parseJsonBody(JsonDocument &doc) {
+SideState *stateForDeviceId(const String &deviceId) {
+  if (leftState.slot.paired && leftState.slot.deviceId.equalsIgnoreCase(deviceId)) {
+    return &leftState;
+  }
+  if (rightState.slot.paired && rightState.slot.deviceId.equalsIgnoreCase(deviceId)) {
+    return &rightState;
+  }
+  return nullptr;
+}
+
+bool parseJsonBody(AsyncWebServerRequest *request, JsonDocument &doc) {
   lastJsonBodyErrorStatus = 400;
   lastJsonBodyError = "invalid json";
-  if (!server.hasArg("plain")) {
+  if (request->contentLength() == 0) {
     lastJsonBodyError = "missing json body";
     return false;
   }
-  const String body = server.arg("plain");
-  if (body.length() > kMaxJsonBodyBytes) {
+  const size_t contentLength = request->contentLength();
+  if (contentLength > kMaxJsonBodyBytes) {
     lastJsonBodyErrorStatus = 413;
     lastJsonBodyError = String("json body exceeds ") + String(kMaxJsonBodyBytes) + " bytes";
+    return false;
+  }
+  String body = "";
+  if (request->hasParam("plain", true)) {
+    body = request->getParam("plain", true)->value();
+  } else {
+    // For raw JSON POST body, read from content
+    body = request->arg("plain");
+  }
+  if (body.length() == 0) {
+    lastJsonBodyError = "missing json body";
     return false;
   }
   const DeserializationError error = deserializeJson(doc, body);
   return !error;
 }
 
-void sendJsonBodyError() {
-  server.send(lastJsonBodyErrorStatus, "application/json", String("{\"error\":\"") + lastJsonBodyError + "\"}");
+void sendJsonBodyError(AsyncWebServerRequest *request) {
+  request->send(lastJsonBodyErrorStatus, "application/json", String("{\"error\":\"") + lastJsonBodyError + "\"}");
 }
 
 void addSlot(JsonObject object, const PairSlot &slot, const SideStatus &status) {
@@ -1008,6 +1061,9 @@ void addSlot(JsonObject object, const PairSlot &slot, const SideStatus &status) 
   statusObject["fanStep"] = status.fanStep;
   statusObject["targetTemperatureC"] = status.targetTemperatureC;
   statusObject["currentTemperatureC"] = status.currentTemperatureC;
+  if (status.beepsMutedKnown) {
+    statusObject["beepMuted"] = status.beepsMuted;
+  }
   statusObject["bleReleased"] = status.bleReleased;
 }
 
@@ -1078,24 +1134,27 @@ bool requestRequiresAuth() {
 }
 
 bool verifyRequestAuth() {
+  if (g_currentRequest == nullptr) {
+    return false;
+  }
   if (!authState.claimed || authState.sharedSecret.length() == 0) {
-    server.send(503, "application/json", "{\"error\":\"gateway not claimed\"}");
+    g_currentRequest->send(503, "application/json", "{\"error\":\"gateway not claimed\"}");
     return false;
   }
 
-  if (!server.hasHeader("X-Gateway-Id") || !server.hasHeader("X-Timestamp") ||
-      !server.hasHeader("X-Nonce") || !server.hasHeader("X-Signature")) {
-    server.send(401, "application/json", "{\"error\":\"missing auth headers\"}");
+  if (!g_currentRequest->hasHeader("X-Gateway-Id") || !g_currentRequest->hasHeader("X-Timestamp") ||
+      !g_currentRequest->hasHeader("X-Nonce") || !g_currentRequest->hasHeader("X-Signature")) {
+    g_currentRequest->send(401, "application/json", "{\"error\":\"missing auth headers\"}");
     return false;
   }
 
-  const String gatewayId = server.header("X-Gateway-Id");
-  const String timestamp = server.header("X-Timestamp");
-  const String nonce = server.header("X-Nonce");
-  const String signature = server.header("X-Signature");
+  const String gatewayId = g_currentRequest->header("X-Gateway-Id");
+  const String timestamp = g_currentRequest->header("X-Timestamp");
+  const String nonce = g_currentRequest->header("X-Nonce");
+  const String signature = g_currentRequest->header("X-Signature");
 
   if (gatewayId != authState.gatewayId) {
-    server.send(403, "application/json", "{\"error\":\"gateway id mismatch\"}");
+    g_currentRequest->send(403, "application/json", "{\"error\":\"gateway id mismatch\"}");
     return false;
   }
 
@@ -1104,24 +1163,25 @@ bool verifyRequestAuth() {
   // and rely on nonce replay protection plus the shared-secret signature.
   const unsigned long timestampMs = strtoul(timestamp.c_str(), nullptr, 10);
   if (timestampMs == 0) {
-    server.send(401, "application/json", "{\"error\":\"invalid timestamp\"}");
+    g_currentRequest->send(401, "application/json", "{\"error\":\"invalid timestamp\"}");
     return false;
   }
 
   if (nonce.length() < 8 || nonceSeen(nonce)) {
-    server.send(409, "application/json", "{\"error\":\"nonce rejected\"}");
+    g_currentRequest->send(409, "application/json", "{\"error\":\"nonce rejected\"}");
     return false;
   }
 
-  String body = server.hasArg("plain") ? server.arg("plain") : "";
-  if (body.length() == 0 && server.hasHeader("X-Firmware-SHA256")) {
-    body = "sha256:" + server.header("X-Firmware-SHA256");
+  String body = g_currentRequest->contentLength() > 0 ? g_currentRequest->arg("plain") : "";
+  if (body.length() == 0 && g_currentRequest->hasHeader("X-Firmware-SHA256")) {
+    body = "sha256:" + g_currentRequest->header("X-Firmware-SHA256");
   }
-  const String message = String(server.method() == HTTP_GET ? "GET" : "POST") + "\n" + server.uri() + "\n" + body + "\n" +
+  const String methodStr = g_currentRequest->method() == HTTP_GET ? String("GET") : String("POST");
+  const String message = methodStr + "\n" + g_currentRequest->url() + "\n" + body + "\n" +
                          timestamp + "\n" + nonce;
   const String expected = hmacHex(authState.sharedSecret, message);
   if (!expected.equalsIgnoreCase(signature)) {
-    server.send(403, "application/json", "{\"error\":\"invalid signature\"}");
+    g_currentRequest->send(403, "application/json", "{\"error\":\"invalid signature\"}");
     return false;
   }
 
@@ -1129,31 +1189,33 @@ bool verifyRequestAuth() {
   return true;
 }
 
-void handleClaimStatus() {
+void handleClaimStatus(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
   JsonDocument doc;
   doc["claimable"] = !authState.claimed;
   doc["claimed"] = authState.claimed;
   doc["gatewayId"] = authState.gatewayId;
   doc["claimedAt"] = authState.claimedAt;
-  writeJsonResponse(200, doc);
+  writeJsonResponse(request, 200, doc);
 }
 
-void handleClaim() {
+void handleClaim(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
   if (authState.claimed) {
-    server.send(409, "application/json", "{\"error\":\"gateway already claimed\"}");
+    request->send(409, "application/json", "{\"error\":\"gateway already claimed\"}");
     return;
   }
 
   JsonDocument body;
-  if (!parseJsonBody(body)) {
-    sendJsonBodyError();
+  if (!parseJsonBody(request, body)) {
+    sendJsonBodyError(request);
     return;
   }
 
   const String gatewayId = body["gatewayId"] | "";
   const String sharedSecret = body["sharedSecret"] | "";
   if (gatewayId.length() < 4 || sharedSecret.length() < 16) {
-    server.send(400, "application/json", "{\"error\":\"gatewayId or sharedSecret too short\"}");
+    request->send(400, "application/json", "{\"error\":\"gatewayId or sharedSecret too short\"}");
     return;
   }
 
@@ -1169,10 +1231,11 @@ void handleClaim() {
   doc["claimed"] = true;
   doc["gatewayId"] = authState.gatewayId;
   doc["claimedAt"] = authState.claimedAt;
-  writeJsonResponse(200, doc);
+  writeJsonResponse(request, 200, doc);
 }
 
-void handleProvisionStatus() {
+void handleProvisionStatus(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
   JsonDocument doc;
   doc["ok"] = true;
   JsonObject network = doc["network"].to<JsonObject>();
@@ -1183,7 +1246,7 @@ void handleProvisionStatus() {
   claim["claimedAt"] = authState.claimedAt;
   JsonObject provisioning = doc["provisioning"].to<JsonObject>();
   provisioning["authRequired"] = provisioningRequiresAuth();
-  writeJsonResponse(200, doc);
+  writeJsonResponse(request, 200, doc);
 }
 
 void handleProvisionSave() {
@@ -1676,7 +1739,7 @@ void handleGatewayPage() {
   server.send(200, "text/html; charset=utf-8", buildGatewayPage());
 }
 
-void handleHealthz() {
+void handleHealthz(AsyncWebServerRequest *request) {
   JsonDocument doc;
   doc["ok"] = true;
   doc["service"] = "bedjet-gateway";
@@ -1685,19 +1748,20 @@ void handleHealthz() {
   doc["firmwareBuildId"] = kFirmwareBuildId;
   JsonObject network = doc["network"].to<JsonObject>();
   addNetworkState(network);
-  writeJsonResponse(200, doc);
+  writeJsonResponse(request, 200, doc);
 }
 
-void handleVersion() {
+void handleVersion(AsyncWebServerRequest *request) {
   JsonDocument doc;
   doc["ok"] = true;
   doc["service"] = "bedjet-gateway";
   JsonObject firmware = doc["firmware"].to<JsonObject>();
   addFirmwareInfo(firmware);
-  writeJsonResponse(200, doc);
+  writeJsonResponse(request, 200, doc);
 }
 
-void handleState() {
+void handleState(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
   JsonDocument doc;
   JsonObject claim = doc["claim"].to<JsonObject>();
   claim["claimed"] = authState.claimed;
@@ -1716,7 +1780,8 @@ void handleState() {
   writeJsonResponse(200, doc);
 }
 
-void handleLocalStatus() {
+void handleLocalStatus(AsyncWebServerRequest *request) {
+  g_currentRequest = request;
   JsonDocument doc;
   doc["ok"] = true;
   doc["simulatedBackend"] = BEDJET_SIMULATED_BACKEND == 1;
@@ -1737,7 +1802,7 @@ void handleLocalStatus() {
   JsonObject sides = doc["sides"].to<JsonObject>();
   addSlot(sides["left"].to<JsonObject>(), leftState.slot, leftState.status);
   addSlot(sides["right"].to<JsonObject>(), rightState.slot, rightState.status);
-  writeJsonResponse(200, doc);
+  writeJsonResponse(request, 200, doc);
 }
 
 void handleLocalSettings() {
@@ -1889,6 +1954,9 @@ void handleVerify() {
   status["fanStep"] = state.status.fanStep;
   status["targetTemperatureC"] = state.status.targetTemperatureC;
   status["currentTemperatureC"] = state.status.currentTemperatureC;
+  if (state.status.beepsMutedKnown) {
+    status["beepMuted"] = state.status.beepsMuted;
+  }
   status["bleReleased"] = state.status.bleReleased;
   if (state.slot.paired) {
     signalActivityLight(makeRgbColor(0, 220, 96), 520);
@@ -1970,37 +2038,95 @@ void handleCommand() {
     return;
   }
 
+  // Send only meaningful state changes to the BedJet to avoid redundant beeps.
+  JsonDocument effectiveBody;
   SideStatus desired = state.status;
+
   if (body["power"].is<const char *>()) {
-    desired.power = body["power"].as<const char *>();
+    const String requestedPower = body["power"].as<const char *>();
+    if (!requestedPower.equalsIgnoreCase(state.status.power)) {
+      desired.power = requestedPower;
+      effectiveBody["power"] = requestedPower;
+    }
   }
+
   if (body["mode"].is<const char *>()) {
-    desired.mode = normalizeMode(body["mode"].as<const char *>());
+    const String normalizedMode = normalizeMode(body["mode"].as<const char *>());
+    if (!normalizedMode.equalsIgnoreCase(state.status.mode)) {
+      desired.mode = normalizedMode;
+      effectiveBody["mode"] = normalizedMode;
+    }
   }
+
   if (body["fanStep"].is<int>()) {
-    desired.fanStep = normalizeFanStep(body["fanStep"].as<int>());
+    const int normalizedFanStep = normalizeFanStep(body["fanStep"].as<int>());
+    if (normalizedFanStep != state.status.fanStep) {
+      desired.fanStep = normalizedFanStep;
+      effectiveBody["fanStep"] = normalizedFanStep;
+    }
   }
+
   if (body["targetTemperatureC"].is<int>()) {
-    desired.targetTemperatureC = body["targetTemperatureC"].as<int>();
+    const int requestedTarget = body["targetTemperatureC"].as<int>();
+    if (requestedTarget != state.status.targetTemperatureC) {
+      desired.targetTemperatureC = requestedTarget;
+      effectiveBody["targetTemperatureC"] = requestedTarget;
+    }
+  }
+
+  if (body["beepMuted"].is<bool>()) {
+    const bool requestedMute = body["beepMuted"].as<bool>();
+    if (!state.status.beepsMutedKnown || requestedMute != state.status.beepsMuted) {
+      desired.beepsMuted = requestedMute;
+      desired.beepsMutedKnown = true;
+      effectiveBody["beepMuted"] = requestedMute;
+    }
+  }
+
+  if (effectiveBody.size() == 0) {
+    JsonDocument response;
+    response["ok"] = true;
+    response["confirmed"] = true;
+    response["side"] = side;
+    JsonObject status = response["status"].to<JsonObject>();
+    status["power"] = state.status.power;
+    status["mode"] = state.status.mode;
+    status["fanStep"] = state.status.fanStep;
+    status["targetTemperatureC"] = state.status.targetTemperatureC;
+    status["currentTemperatureC"] = state.status.currentTemperatureC;
+    if (state.status.beepsMutedKnown) {
+      status["beepMuted"] = state.status.beepsMuted;
+    }
+    status["bleReleased"] = state.status.bleReleased;
+    writeJsonResponse(200, response);
+    return;
   }
 
   if (!useSimulatedBackend()) {
     String error;
-    if (!applyModeOrPower(state, body, error)) {
+    if (!applyModeOrPower(state, effectiveBody, error)) {
       server.send(503, "application/json", String("{\"error\":\"") + error + "\"}");
       return;
     }
-    if (body["fanStep"].is<int>() && !sendBedJetFan(state.slot.deviceId, body["fanStep"].as<int>(), error)) {
+    if (effectiveBody["fanStep"].is<int>() &&
+        !sendBedJetFan(state.slot.deviceId, effectiveBody["fanStep"].as<int>(), error)) {
       server.send(503, "application/json", String("{\"error\":\"") + error + "\"}");
       return;
     }
-    if (body["targetTemperatureC"].is<int>() &&
-        !sendBedJetTemperature(state.slot.deviceId, body["targetTemperatureC"].as<int>(), error)) {
+    if (effectiveBody["targetTemperatureC"].is<int>() &&
+        !sendBedJetTemperature(state.slot.deviceId, effectiveBody["targetTemperatureC"].as<int>(), error)) {
       server.send(503, "application/json", String("{\"error\":\"") + error + "\"}");
       return;
+    }
+    if (effectiveBody["beepMuted"].is<bool>()) {
+      const uint8_t button = effectiveBody["beepMuted"].as<bool>() ? BTN_MUTE : BTN_UNMUTE;
+      if (!sendBedJetButton(state.slot.deviceId, button, error)) {
+        server.send(503, "application/json", String("{\"error\":\"") + error + "\"}");
+        return;
+      }
     }
 
-    if (!confirmCommandApplied(state, body, desired, error)) {
+    if (!confirmCommandApplied(state, effectiveBody, desired, error)) {
       server.send(504, "application/json", String("{\"error\":\"") + error + "\"}");
       return;
     }
@@ -2009,7 +2135,7 @@ void handleCommand() {
   }
 
   state.status.bleReleased = false;
-  signalActivityLight(colorForCommandActivity(before, state.status, body));
+  signalActivityLight(colorForCommandActivity(before, state.status, effectiveBody));
 
   JsonDocument response;
   response["ok"] = true;
@@ -2021,6 +2147,9 @@ void handleCommand() {
   status["fanStep"] = state.status.fanStep;
   status["targetTemperatureC"] = state.status.targetTemperatureC;
   status["currentTemperatureC"] = state.status.currentTemperatureC;
+  if (state.status.beepsMutedKnown) {
+    status["beepMuted"] = state.status.beepsMuted;
+  }
   status["bleReleased"] = state.status.bleReleased;
   writeJsonResponse(200, response);
 }
@@ -2330,8 +2459,6 @@ void setup() {
   bleScan->setActiveScan(true);
   bleScan->setInterval(160);
   bleScan->setWindow(80);
-  const char *headerKeys[] = {"X-Gateway-Id", "X-Timestamp", "X-Nonce", "X-Signature", "X-Firmware-SHA256"};
-  server.collectHeaders(headerKeys, 5);
 
   leftState.slot.side = "left";
   rightState.slot.side = "right";
@@ -2360,7 +2487,6 @@ void setup() {
 }
 
 void loop() {
-  server.handleClient();
   tickActivityLight();
   if (restartScheduled && millis() >= restartAtMs) {
     ESP.restart();
