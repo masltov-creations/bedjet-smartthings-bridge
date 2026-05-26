@@ -67,26 +67,24 @@ local function schedule_expedited_refresh_burst(device)
   schedule_refresh(device, 4)
 end
 
+local get_remembered_unit_status
+
 local function handle_state_mismatch(device)
   -- Detect if current state doesn't match remembered state
-  -- If mismatch, tighten polling interval to 1-2s for 3-4 cycles
-  -- Then relax back to normal 5s interval
+  -- If mismatch, tighten polling interval for a few cycles, then relax.
   local mismatch_cycles = tonumber(device:get_field(fields.MISMATCH_CYCLES) or 0)
   local last_mismatch_at_ms = tonumber(device:get_field(fields.LAST_MISMATCH_AT_MS) or 0)
-  local current_time_ms = os.time() * 1000  -- Approximate milliseconds
-  
-  -- Reset counter if > 5 minutes since last mismatch
+  local current_time_ms = os.time() * 1000
+
   if last_mismatch_at_ms > 0 and (current_time_ms - last_mismatch_at_ms) > 300000 then
     mismatch_cycles = 0
   end
-  
+
   if mismatch_cycles > 0 then
     mismatch_cycles = mismatch_cycles + 1
-    -- Keep tight polling for 3 cycles, then relax
     if mismatch_cycles > 3 then
       device:set_field(fields.MISMATCH_CYCLES, 0)
       device:set_field(fields.LAST_MISMATCH_AT_MS, nil)
-      -- Allow poll interval to return to normal
     else
       device:set_field(fields.MISMATCH_CYCLES, mismatch_cycles)
       device:set_field(fields.LAST_MISMATCH_AT_MS, current_time_ms)
@@ -95,37 +93,35 @@ local function handle_state_mismatch(device)
 end
 
 local function detect_state_mismatch(device, current_status)
-  -- Compare current reported status against remembered status
-  -- If mismatch detected, trigger adaptive backoff
   if not current_status then
     return
   end
-  
+
   local remembered = get_remembered_unit_status(device)
   if not remembered then
-    return  -- No previous state to compare
+    return
   end
-  
+
   local mismatch = false
-  
-  -- Check each field for mismatch
   if (remembered.power or "off") ~= (current_status.power or "off") then
     mismatch = true
   elseif (remembered.mode or "cool") ~= (current_status.mode or "cool") then
     mismatch = true
-  elseif (remembered.fan_step or 8) ~= tonumber(current_status.fanStep or 8) then
+  elseif (tonumber(remembered.fanStep) or 8) ~= tonumber(current_status.fanStep or 8) then
     mismatch = true
-  elseif (remembered.target_temperature_c or 24) ~= tonumber(current_status.targetTemperatureC or 24) then
+  elseif (tonumber(remembered.targetTemperatureC) or 24) ~= tonumber(current_status.targetTemperatureC or 24) then
     mismatch = true
   end
-  
+
   if mismatch then
-    log.info(string.format("State mismatch detected: remembered=%s, current=%s", 
-      tostring(remembered), tostring(current_status)))
     device:set_field(fields.MISMATCH_CYCLES, 1)
     device:set_field(fields.LAST_MISMATCH_AT_MS, os.time() * 1000)
+  else
+    handle_state_mismatch(device)
   end
 end
+
+local function remember_unit_status(device, status)
   if not status or type(status) ~= "table" then
     return
   end
@@ -136,13 +132,13 @@ end
   device:set_field(fields.LAST_TARGET_TEMPERATURE_C, tonumber(status.targetTemperatureC))
 end
 
-local function get_remembered_unit_status(device)
+get_remembered_unit_status = function(device)
   local power = device:get_field(fields.LAST_POWER)
   local mode = device:get_field(fields.LAST_MODE)
-  local fan_step = tonumber(device:get_field(fields.LAST_FAN_STEP))
-  local target_temperature_c = tonumber(device:get_field(fields.LAST_TARGET_TEMPERATURE_C))
+    local fan_step = tonumber(device:get_field(fields.LAST_FAN_STEP) or 0)
+    local target_temperature_c = tonumber(device:get_field(fields.LAST_TARGET_TEMPERATURE_C) or 0)
 
-  if power == nil and mode == nil and fan_step == nil and target_temperature_c == nil then
+    if power == nil and mode == nil and fan_step == 0 and target_temperature_c == 0 then
     return nil
   end
 
@@ -441,7 +437,7 @@ function M.refresh(_, device)
   local configured_poll = snapshot and snapshot.gatewayConfig and tonumber(snapshot.gatewayConfig.pollIntervalSeconds) or nil
   if configured_poll then
     configured_poll = clamp(math.floor(configured_poll), MIN_POLL_INTERVAL_SECONDS, MAX_POLL_INTERVAL_SECONDS)
-    local prior_poll = tonumber(device:get_field(fields.POLL_INTERVAL_SECONDS))
+      local prior_poll = tonumber(device:get_field(fields.POLL_INTERVAL_SECONDS) or 0)
     if prior_poll ~= configured_poll then
       device:set_field(fields.POLL_INTERVAL_SECONDS, configured_poll)
       start_polling(device)
@@ -623,6 +619,7 @@ end
 
 function M.device_removed(_, device)
   local token = (tonumber(device:get_field(fields.POLL_TOKEN)) or 0) + 1
+    local token = (tonumber(device:get_field(fields.POLL_TOKEN) or 0) or 0) + 1
   device:set_field(fields.POLL_TOKEN, token)
   log.info("BedJet device removed", { device = device.device_network_id })
 end

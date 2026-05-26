@@ -1,5 +1,17 @@
 # BedJet Optimization Work - Session Summary
 
+## Update (2026-05-25, latest)
+
+This block supersedes older Phase 2 entries below.
+
+- Phase 2 is complete.
+- Compilation passed with 0 errors; firmware build produced `.pio/build/esp32-s3-devkitc-1/firmware.bin` (~1.44 MB).
+- Full async handler migration was completed in commit `8c6faba`.
+- PlatformIO is installed and validation script currently passes.
+
+Immediate next step:
+- Flash target gateway and run `firmware/test/verify-endpoints.ps1` against the live device.
+
 ## Session Overview
 Three-phase optimization work completed 2 out of 3 phases with substantial groundwork for the third:
 

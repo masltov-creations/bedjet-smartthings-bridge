@@ -11,12 +11,31 @@ This repo targets a private SmartThings Edge LAN driver flow, not a cloud Schema
 
 Recommended configured install flow (repo root):
 
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-ConfiguredEdgeDriver.ps1 `
+  -ChannelId <channel-id> `
+  -HubId <hub-id> `
+  -BridgeHost <bridge-hostname-or-ip> `
+  -BridgeFallbackIp <bridge-lan-ip> `
+  -BridgePort 8787
+```
+
+Linux/macOS:
+
 ```bash
 ./scripts/smartthings/Install-ConfiguredEdgeDriver.sh \
   --channel-id <channel-id> \
   --hub-id <hub-id> \
   --bridge-host <bridge-hostname-or-ip> \
   --bridge-fallback-ip <bridge-lan-ip>
+```
+
+Always run preference/routing validation before claiming SmartThings E2E success:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Validate-SmartThingsRouting.ps1
 ```
 
 Package the driver:

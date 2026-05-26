@@ -32,7 +32,8 @@ function Get-SetupState {
 
 function Resolve-SshTarget {
     param(
-        [Parameter(Mandatory)]
+        [Parameter()]
+        [AllowEmptyString()]
         [string]$ProvidedTarget,
 
         [Parameter(Mandatory)]

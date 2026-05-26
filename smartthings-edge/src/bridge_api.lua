@@ -6,8 +6,6 @@ local log = require "log"
 local M = {}
 local LAST_KNOWN_IP_FIELD = "bedjet_last_known_bridge_ip"
 local DEFAULT_SOCKET_TIMEOUT_SECONDS = 5
-local DEFAULT_BRIDGE_HOST = "master-vm"
-local DEFAULT_BRIDGE_FALLBACK_IP = "192.168.1.234"
 
 local function trim(value)
   return (value or ""):match("^%s*(.-)%s*$")
@@ -52,7 +50,7 @@ end
 local function get_bridge_host(device)
   local value = sanitize_host(device.preferences.bridgeHost)
   if value == "" or value == "bridge-host-or-ip" then
-    return DEFAULT_BRIDGE_HOST
+    return nil
   end
   return value
 end
@@ -73,9 +71,6 @@ local function get_last_known_ip(device)
   local configured_fallback = sanitize_host(device.preferences.bridgeFallbackIp)
   if is_ipv4(configured_fallback) then
     return configured_fallback
-  end
-  if is_ipv4(DEFAULT_BRIDGE_FALLBACK_IP) then
-    return DEFAULT_BRIDGE_FALLBACK_IP
   end
   return nil
 end
@@ -304,7 +299,7 @@ local function request_json(device, method, path, body)
   end
 
   if #hosts == 0 then
-    error("Bridge host is not configured")
+    error("Bridge host is not configured. Set bridgeHost and bridgeFallbackIp in device preferences.")
   end
 
   local last_err = nil

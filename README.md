@@ -10,6 +10,14 @@ This project connects two BedJet units to SmartThings with:
 
 Think of it as a translator stack: SmartThings speaks LAN, BedJet speaks BLE, and the bridge keeps everyone from arguing about state.
 
+## If You Only Read One Section
+
+- Install in order: gateway, bridge, pairing, Edge driver, then end-to-end validation.
+- Trust readback, not optimism: the bridge and driver are designed to reflect the actual BedJet state.
+- If SmartThings says "success" but nothing changed, assume routing or reachability is lying to you until proven otherwise.
+
+That last rule sounds cynical, but it saves time.
+
 What it does:
 
 - Controls up to two BedJet units from SmartThings.
@@ -305,7 +313,20 @@ You need:
 
 Basic flow:
 
-1. Install a configured driver package (recommended, sets host/port defaults at package time):
+1. Install a configured driver package (recommended, sets host/port defaults at package time).
+
+Windows PowerShell path (recommended on Windows):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-ConfiguredEdgeDriver.ps1 `
+  -ChannelId <channel-id> `
+  -HubId <hub-id> `
+  -BridgeHost <bridge-hostname-or-ip> `
+  -BridgeFallbackIp <bridge-lan-ip> `
+  -BridgePort 8787
+```
+
+Linux/macOS helper path:
 
 ```bash
 <repo-root>/scripts/smartthings/Install-ConfiguredEdgeDriver.sh \
@@ -316,27 +337,35 @@ Basic flow:
   --bridge-port 8787
 ```
 
-2. Alternative manual packaging path (if you are not using the helper script):
+2. Alternative manual packaging path (if you are not using either install path above):
 
 ```bash
 XDG_STATE_HOME=/tmp smartthings edge:drivers:package <repo-root>/smartthings-edge
 ```
 
-3. Create or reuse a private channel.
-4. Assign the driver to that channel.
-5. Enroll the hub in that channel.
-6. Install the driver onto the hub.
-7. Ensure SmartThings device preferences match setup output:
+Do not use the raw package command above for production without first injecting bridge defaults; otherwise devices can retain placeholder values like `bridge-host-or-ip`.
+
+3. Verify installed driver version on the target hub:
+
+```bash
+smartthings edge:drivers:installed <driver-id> --hub <hub-id> --json
+```
+
+4. Ensure SmartThings device preferences match setup output:
    - `bridgeHost=<SmartThings driver host from setup output>`
    - `bridgeFallbackIp=<SmartThings bridge fallback LAN IPv4>`
    - `bridgePort=<SmartThings driver port from setup output>`
    - `bridgeToken=<BRIDGE_SHARED_SECRET>` (only when bridge auth is enabled)
    - Apply to both unit devices and both launcher devices.
    - Note: SmartThings currently does not provide a reliable non-interactive API/CLI path to bulk write Edge device preferences for existing devices. Use the app device settings when needed.
-8. Set side mapping in preferences:
-   - Left-side devices -> `side=left`
-   - Right-side devices -> `side=right`
-9. Validate:
+  - Preflight before any E2E claim:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Validate-SmartThingsRouting.ps1
+```
+
+  - The preflight fails if `bridgeHost` is still `bridge-host-or-ip`, if runtime side inference is invalid, or if runtime device identity only represents one side.
+5. Validate:
    - Device discovery
    - Left/right command execution
    - Accurate state refresh/readback
@@ -384,6 +413,12 @@ The system is only considered end-to-end working when a command travels through 
 `SmartThings -> Edge Driver -> Bridge -> Gateway -> BedJet -> Gateway Readback -> Bridge API -> SmartThings`
 
 If any hop is skipped, this is not E2E.
+
+### No Untested Claims Policy
+
+- Do not claim E2E works unless a SmartThings-triggered ON and OFF command were observed end-to-end.
+- A bridge/gateway API-only test is valuable but is not proof of SmartThings app E2E behavior.
+- If SmartThings preferences are placeholder/default values, E2E must be marked failed until corrected and retested.
 
 ### Pre-Checks
 

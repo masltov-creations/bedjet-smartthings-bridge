@@ -49,15 +49,33 @@ curl -X POST http://192.168.1.11/api/v1/command/left \
   -d '{"power":"on","mode":"cool"}'
 ```
 
+#### Windows Endpoint Smoke Test (Post-Flash)
+```powershell
+# From repository root
+.\firmware\test\verify-endpoints.ps1 -BaseUrl http://192.168.1.11
+
+# Optional async/concurrency probe
+.\firmware\test\verify-endpoints.ps1 -BaseUrl http://192.168.1.11 -RunConcurrencyProbe
+```
+
+Important: these firmware endpoint checks validate gateway HTTP behavior only. They do not prove SmartThings app-to-driver-to-bridge E2E control.
+
+Before claiming SmartThings E2E success, run routing preflight:
+
+```powershell
+.\scripts\windows\Validate-SmartThingsRouting.ps1
+```
+
 ### Phase-Specific Tests
 
 #### Phase 2: AsyncWebServer Migration
 - [x] Compilation without errors
-- [ ] All HTTP endpoints respond (GET /api/v1/version, etc.)
-- [ ] POST requests with JSON body work (command, claim, settings)
-- [ ] Multiple concurrent requests don't block each other
-- [ ] Chunked firmware upload completes successfully
-- [ ] Response times improve vs. blocking WebServer
+- [x] 20+ handlers migrated to AsyncWebServerRequest signatures
+- [x] Legacy server.send()/server.uri() usage removed from handlers
+- [x] parseSideFromUri() and route wiring migrated for async request context
+- [ ] Hardware endpoint validation on flashed ESP32-S3
+- [ ] Chunked firmware upload validation on hardware
+- [ ] Response-time comparison vs. blocking WebServer baseline
 
 #### Phase 1: Per-Side BLE State Tracking
 - [ ] Duplicate BLE reads within 200ms window are skipped
@@ -72,4 +90,5 @@ curl -X POST http://192.168.1.11/api/v1/command/left \
 
 ### Test Harness Validation
 
-Check `test_validation.sh` for automated smoke tests.
+- Use `validate.ps1` or `validate.sh` for compile/build smoke tests.
+- Use `verify-endpoints.ps1` after flashing firmware to validate key API routes.

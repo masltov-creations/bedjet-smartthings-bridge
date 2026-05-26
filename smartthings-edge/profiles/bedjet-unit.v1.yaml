@@ -60,16 +60,6 @@ preferences:
       default: ""
       minLength: 0
       maxLength: 255
-  - title: Side
-    name: side
-    description: Logical BedJet side controlled by this device
-    required: true
-    preferenceType: enumeration
-    definition:
-      options:
-        left: Left
-        right: Right
-      default: left
   - title: Poll Interval Seconds
     name: pollIntervalSeconds
     description: Fallback SmartThings refresh interval when gateway override is unavailable
