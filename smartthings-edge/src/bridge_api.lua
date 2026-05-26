@@ -326,7 +326,7 @@ local function request_json(device, method, path, body)
 end
 
 function M.fetch_side(device, side)
-  return request_json(device, "GET", "/v1/bedjets/" .. side)
+  return request_json(device, "GET", "/v1/bedjets/" .. side .. "?live=1")
 end
 
 function M.send_power(device, side, power_state)

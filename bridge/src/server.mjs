@@ -361,6 +361,43 @@ const buildSystemSnapshot = async ({ runtimeConfig, store, firmware, engine, cac
   };
 };
 
+const buildBedjetSnapshot = async ({ side, store, firmware, cache, firmwareOptions, liveVerify = false }) => {
+  const gatewayState = structuredClone(await getSynchronizedGatewayState({ store, firmware, cache, firmwareOptions }));
+
+  if (liveVerify) {
+    const verified = await firmware.verify(side, firmwareOptions);
+    const gatewaySide = gatewayState.sides?.[side] ?? {};
+    gatewayState.sides = gatewayState.sides || {};
+    gatewayState.sides[side] = {
+      ...gatewaySide,
+      paired: Boolean(verified?.pairing?.deviceId),
+      deviceId: verified?.pairing?.deviceId || gatewaySide.deviceId || "",
+      displayName: verified?.pairing?.displayName || gatewaySide.displayName || "",
+      pairedAt: verified?.pairing?.pairedAt || gatewaySide.pairedAt || "",
+      status: verified?.status || gatewaySide.status || null
+    };
+
+    if (verified?.pairing) {
+      store.savePairing(side, verified.pairing);
+    } else {
+      store.clearPairing(side);
+    }
+
+    if (cache) {
+      cache.value = gatewayState;
+      cache.fetchedAt = Date.now();
+    }
+  }
+
+  return {
+    side,
+    pairing: store.getPairing(side),
+    gateway: gatewayState.sides?.[side] ?? null,
+    gatewayConfig: gatewayState.smartthings ?? null,
+    run: store.getRun(side)
+  };
+};
+
 export const createBridgeServer = (options = {}) => {
   const runtimeConfig = validateRuntimeConfig({ ...defaultConfig, ...(options.config || {}) });
   const logger = options.logger || defaultLogger;
@@ -430,14 +467,15 @@ export const createBridgeServer = (options = {}) => {
       const bedjetReadMatch = url.pathname.match(/^\/v1\/bedjets\/(left|right)$/);
       if (request.method === "GET" && bedjetReadMatch) {
         const [, side] = bedjetReadMatch;
-        const gatewayState = await getSynchronizedGatewayState({ store, firmware, cache: gatewayStateCache, firmwareOptions: stateFirmwareOptions });
-        sendJson(response, 200, {
+        const liveVerify = url.searchParams.get("live") === "1";
+        sendJson(response, 200, await buildBedjetSnapshot({
           side,
-          pairing: store.getPairing(side),
-          gateway: gatewayState.sides?.[side] ?? null,
-          gatewayConfig: gatewayState.smartthings ?? null,
-          run: store.getRun(side)
-        });
+          store,
+          firmware,
+          cache: gatewayStateCache,
+          firmwareOptions: stateFirmwareOptions,
+          liveVerify
+        }));
         return;
       }
 

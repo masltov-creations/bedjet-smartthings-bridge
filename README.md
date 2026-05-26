@@ -123,7 +123,7 @@ Do not print or commit secrets.
 - HTTP server port: `80`.
 - Setup AP SSID: `BedJetGatewaySetup`.
 - SmartThings poll interval:
-  - default `15s`
+  - default `5s`
   - minimum `5s`
   - maximum `120s`
 - BLE scan duration per scan request: `4s`.

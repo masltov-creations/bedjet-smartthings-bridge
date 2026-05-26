@@ -170,3 +170,48 @@ test("API state changes work against mock-gateway (live firmware transport)", as
   await jsonRequest(baseUrl, "POST", "/v1/bedjets/left/forget", {});
   assert.equal(app.store.getPairing("left"), null);
 });
+
+test("live bedjet snapshot uses verify path for fresh status", async (t) => {
+  const app = createBridgeServer({
+    config: {
+      host: "127.0.0.1",
+      port: 0,
+      dataPath: makeTempDb(),
+      simulateFirmware: true
+    },
+    logger
+  });
+
+  await app.firmware.claimGateway({ gatewayId: "bedjet-bridge" });
+  await app.start();
+  t.after(async () => {
+    await app.stop();
+  });
+
+  const { port } = app.server.address();
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  await jsonRequest(baseUrl, "POST", "/v1/bedjets/left/pair", {
+    deviceId: "bedjet-3-left-demo",
+    displayName: "BedJet 3 Left Demo"
+  });
+
+  const originalVerify = app.firmware.verify.bind(app.firmware);
+  app.firmware.verify = async (side, options) => {
+    const verified = await originalVerify(side, options);
+    return {
+      ...verified,
+      status: {
+        ...verified.status,
+        power: "on",
+        mode: "cool"
+      }
+    };
+  };
+
+  const cachedSnapshot = await jsonRequest(baseUrl, "GET", "/v1/bedjets/left");
+  assert.equal(cachedSnapshot.gateway.status.power, "off");
+
+  const liveSnapshot = await jsonRequest(baseUrl, "GET", "/v1/bedjets/left?live=1");
+  assert.equal(liveSnapshot.gateway.status.power, "on");
+});
